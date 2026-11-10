@@ -1,4 +1,4 @@
- import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+ import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import axios from 'axios';
@@ -11,11 +11,55 @@ import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import 'dotenv/config';
 
-// Render ke liye Dummy Web Server (Port Binding Fix)
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Synvora AI Bot is Running 24/7!'));
-app.listen(PORT, () => console.log(`🌐 Dummy Web Server running on port ${PORT}`));
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://synvora-whatsapp-bot.onrender.com';
+
+let sock;
+let latestQr = null;
+let isConnected = false;
+let isConnecting = false;
+
+// Web Dashboard & QR Code Page
+app.get('/', (req, res) => {
+  if (isConnected) {
+    return res.send(`
+      <div style="font-family:sans-serif;text-align:center;padding:50px;">
+        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai!</h1>
+        <p>Aap apna PC aur internet band kar sakte hain. Bot cloud par chal raha hai.</p>
+      </div>
+    `);
+  }
+  if (latestQr) {
+    const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(latestQr)}`;
+    return res.send(`
+      <div style="font-family:sans-serif;text-align:center;padding:40px;">
+        <h2>📲 Scan WhatsApp QR Code (Synvora AI)</h2>
+        <p>Apne WhatsApp > Linked Devices > Link a Device se niche diya QR scan karein:</p>
+        <img src="${qrImg}" style="border:8px solid #eee;border-radius:12px;margin-top:15px;" />
+        <p style="color:#666;margin-top:15px;">Page ko har 10 second mein refresh karein agar QR expire ho jaye.</p>
+      </div>
+    `);
+  }
+  res.send('<h2 style="font-family:sans-serif;text-align:center;padding:50px;">⏳ Bot start ho raha hai... 5 second baad page refresh karein.</h2>');
+});
+
+// Render Keep-Alive Ping Endpoint
+app.get('/ping', (req, res) => res.status(200).send('pong'));
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 Web Server running on port ${PORT}`);
+});
+
+// Self-Ping har 10 minute mein taaki Render sleep na ho
+setInterval(async () => {
+  try {
+    await axios.get(`${RENDER_URL}/ping`);
+    console.log('💓 Keep-Alive Ping successful');
+  } catch (e) {
+    console.log('Keep-Alive Ping error:', e.message);
+  }
+}, 10 * 60 * 1000);
 
 const supabase = createClient(
   process.env.SUPABASE_URL?.trim(),
@@ -30,10 +74,8 @@ const chromePaths = [
 ];
 const executablePath = chromePaths.find(p => fs.existsSync(p));
 
-let sock;
-
 async function sendWA(phoneOrJid, text) {
-  if (!sock) return;
+  if (!sock || !isConnected) return;
   const jid = phoneOrJid.includes('@')
     ? phoneOrJid
     : `${phoneOrJid.replace(/\D/g, '')}@s.whatsapp.net`;
@@ -186,7 +228,6 @@ const groqTools = [
   }
 ];
 
-// Auto-Detect Active Groq Chat Models
 let cachedChatModels = null;
 
 async function getGroqChatModels() {
@@ -203,11 +244,9 @@ async function getGroqChatModels() {
     return score(a) - score(b);
   });
   cachedChatModels = filtered.length ? filtered : allIds;
-  console.log('🚀 Active Groq Models Found:', cachedChatModels.slice(0, 5).join(', '));
   return cachedChatModels;
 }
 
-// Ultra-Fast Groq API Helper with Strict Script & Language Matching
 async function askGroq(prompt, useTools = true) {
   const models = await getGroqChatModels();
   let lastError = null;
@@ -221,7 +260,7 @@ async function askGroq(prompt, useTools = true) {
           messages: [
             {
               role: 'system',
-              content: `You are Synvora AI, an advanced proprietary 24/7 autonomous AI Receptionist developed by Synvora AI Automation (synvora.co.in). 
+              content: `You are Synvora AI, an advanced proprietary 24/7 autonomous AI Receptionist developed by Synvora AI Automation (synvora.co.in).
 
               STRICT LANGUAGE & STYLE MATCHING RULES:
               1. MATCH THE USER'S SCRIPT/LANGUAGE EXACTLY: If the user types in Hinglish or Roman script (e.g., "Tum kya kar rahe ho"), you MUST reply back in the exact same Hinglish Roman script. NEVER reply in Devanagari/Hindi script unless the user explicitly types in Devanagari.
@@ -276,262 +315,295 @@ async function askGroq(prompt, useTools = true) {
 }
 
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
+  if (isConnecting) return;
+  isConnecting = true;
 
-  sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: 'silent' })
-  });
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
+    const { version } = await fetchLatestBaileysVersion();
 
-  sock.ev.on('creds.update', saveCreds);
+    sock = makeWASocket({
+      version,
+      auth: state,
+      logger: pino({ level: 'silent' }),
+      browser: ['Synvora AI', 'Chrome', '1.0.0'],
+      syncFullHistory: false
+    });
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    sock.ev.on('creds.update', saveCreds);
 
-    if (qr) {
-      console.log('\n📲 Neeche diye gaye QR Code ko apne WhatsApp (Linked Devices) se scan karein:\n');
-      qrcode.generate(qr, { small: true });
-    }
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('🔄 Connection closed. Reconnecting...', shouldReconnect);
-      if (shouldReconnect) startBot();
-    } else if (connection === 'open') {
-      console.log('⚡ Synvora Groq AI WhatsApp Agent LIVE ho chuka hai! Ab message bhej kar test karein.');
-    }
-  });
+      if (qr) {
+        latestQr = qr;
+        isConnected = false;
+        console.log(`\n📲 QR Code Ready! Browser mein yeh link khol kar scan karein: ${RENDER_URL}\n`);
+        qrcode.generate(qr, { small: true });
+      }
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    const msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+      if (connection === 'open') {
+        isConnected = true;
+        isConnecting = false;
+        latestQr = null;
+        console.log('⚡ Synvora Groq AI WhatsApp Agent 24/7 LIVE ho chuka hai!');
+      }
 
-    const remoteJid = msg.key.remoteJid;
-    if (remoteJid === 'status@broadcast') return;
+      if (connection === 'close') {
+        isConnected = false;
+        isConnecting = false;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        console.log(`⚠️ Connection closed with status: ${statusCode}`);
 
-    const userPhone = remoteJid
-      .replace('@s.whatsapp.net', '')
-      .replace('@g.us', '')
-      .replace('@lid', '');
-
-    const userText =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message.imageMessage?.caption ||
-      '';
-
-    if (!userText.trim()) return;
-    console.log(`📩 Message from ${userPhone}: ${userText}`);
-
-    const reply = async (text) => {
-      await sock.sendMessage(remoteJid, { text }, { quoted: msg });
-    };
-
-    try {
-      if (userText.toLowerCase().includes('shared with me')) {
-        const { data: shared } = await supabase
-          .from('shared_memories')
-          .select('*, memory_bubbles(item_title, content)')
-          .eq('recipient_phone', userPhone)
-          .eq('is_active', true);
-
-        if (!shared?.length) {
-          await reply('Abhi aapke sath koi active memory share nahi ki gayi hai.');
+        if (statusCode === DisconnectReason.loggedOut || statusCode === 405) {
+          console.log('🗑️ Session logged out. Clearing baileys_auth for fresh QR...');
+          fs.rmSync('./baileys_auth', { recursive: true, force: true });
+          setTimeout(startBot, 3000);
+        } else if (statusCode === DisconnectReason.connectionReplaced || statusCode === 440) {
+          console.log('⏸️ Session conflict detected! Make sure bot is STOPPED on your local PC. Retrying in 15s...');
+          setTimeout(startBot, 15000);
         } else {
-          const list = shared.map(s => `🔒 *${s.memory_bubbles?.item_title}*: ${s.memory_bubbles?.content} (From ${s.owner_phone})`).join('\n');
-          await reply(`*Shared With Me:*\n\n${list}`);
+          console.log('🔄 Reconnecting in 5 seconds...');
+          setTimeout(startBot, 5000);
         }
-        return;
       }
+    });
 
-      const { data: recentMemories } = await supabase
-        .from('memory_bubbles')
-        .select('bubble_name, item_title, content')
-        .eq('user_phone', userPhone)
-        .limit(10);
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+      const msg = messages[0];
+      if (!msg.message || msg.key.fromMe) return;
 
-      const memoryContext = recentMemories?.length
-        ? `Saved user memories: ${JSON.stringify(recentMemories)}.`
-        : 'No saved memories yet.';
+      const remoteJid = msg.key.remoteJid;
+      if (remoteJid === 'status@broadcast') return;
 
-      const aiMsg = await askGroq(
-        `Current Time: ${new Date().toISOString()}. ${memoryContext} User (${userPhone}) says: "${userText}"`,
-        true
-      );
+      const userPhone = remoteJid
+        .replace('@s.whatsapp.net', '')
+        .replace('@g.us', '')
+        .replace('@lid', '');
 
-      const toolCall = aiMsg.tool_calls?.[0];
-      if (!toolCall) {
-        await reply(aiMsg.content || 'Main samajh gaya, bataiye aage kya karna hai?');
-        return;
-      }
+      const userText =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        '';
 
-      const callName = toolCall.function.name;
-      const args = JSON.parse(toolCall.function.arguments || '{}');
+      if (!userText.trim()) return;
+      console.log(`📩 Message from ${userPhone}: ${userText}`);
 
-      if (callName === 'save_to_vault') {
-        await supabase.from('memory_bubbles').insert({
-          user_phone: userPhone,
-          bubble_name: (args.bubble_name || 'general').toLowerCase(),
-          item_title: args.item_title,
-          content: args.content
-        });
-        await reply(`✅ *${args.item_title}* ko aapke *${args.bubble_name}* Bubble mein save kar liya gaya hai.`);
-      } else if (callName === 'search_vault') {
-        const { data: items } = await supabase
+      const reply = async (text) => {
+        await sock.sendMessage(remoteJid, { text }, { quoted: msg });
+      };
+
+      try {
+        if (userText.toLowerCase().includes('shared with me')) {
+          const { data: shared } = await supabase
+            .from('shared_memories')
+            .select('*, memory_bubbles(item_title, content)')
+            .eq('recipient_phone', userPhone)
+            .eq('is_active', true);
+
+          if (!shared?.length) {
+            await reply('Abhi aapke sath koi active memory share nahi ki gayi hai.');
+          } else {
+            const list = shared.map(s => `🔒 *${s.memory_bubbles?.item_title}*: ${s.memory_bubbles?.content} (From ${s.owner_phone})`).join('\n');
+            await reply(`*Shared With Me:*\n\n${list}`);
+          }
+          return;
+        }
+
+        const { data: recentMemories } = await supabase
           .from('memory_bubbles')
-          .select('*')
+          .select('bubble_name, item_title, content')
           .eq('user_phone', userPhone)
-          .or(`item_title.ilike.%${args.query}%,content.ilike.%${args.query}%,bubble_name.ilike.%${args.query}%`);
+          .limit(10);
 
-        const found = items?.length
-          ? items.map(i => `🗂️ *[${i.bubble_name}] ${i.item_title}*: ${i.content}`).join('\n')
-          : `Vault mein "${args.query}" se juda kuch nahi mila.`;
-        await reply(found);
-      } else if (callName === 'manage_shared_memory') {
-        if (args.mode === 'share') {
-          const { data: mem } = await supabase
+        const memoryContext = recentMemories?.length
+          ? `Saved user memories: ${JSON.stringify(recentMemories)}.`
+          : 'No saved memories yet.';
+
+        const aiMsg = await askGroq(
+          `Current Time: ${new Date().toISOString()}. ${memoryContext} User (${userPhone}) says: "${userText}"`,
+          true
+        );
+
+        const toolCall = aiMsg.tool_calls?.[0];
+        if (!toolCall) {
+          await reply(aiMsg.content || 'Main samajh gaya, bataiye aage kya karna hai?');
+          return;
+        }
+
+        const callName = toolCall.function.name;
+        const args = JSON.parse(toolCall.function.arguments || '{}');
+
+        if (callName === 'save_to_vault') {
+          await supabase.from('memory_bubbles').insert({
+            user_phone: userPhone,
+            bubble_name: (args.bubble_name || 'general').toLowerCase(),
+            item_title: args.item_title,
+            content: args.content
+          });
+          await reply(`✅ *${args.item_title}* ko aapke *${args.bubble_name}* Bubble mein save kar liya gaya hai.`);
+        } else if (callName === 'search_vault') {
+          const { data: items } = await supabase
             .from('memory_bubbles')
             .select('*')
             .eq('user_phone', userPhone)
-            .ilike('item_title', `%${args.item_or_bubble}%`)
-            .single();
+            .or(`item_title.ilike.%${args.query}%,content.ilike.%${args.query}%,bubble_name.ilike.%${args.query}%`);
 
-          if (!mem) return reply(`Vault mein "${args.item_or_bubble}" nahi mila. Pehle save karein!`);
-          if (!args.contact_phone) return reply(`Kripya ${args.contact_name} ka WhatsApp number country code (91...) ke sath batayein.`);
+          const found = items?.length
+            ? items.map(i => `🗂️ *[${i.bubble_name}] ${i.item_title}*: ${i.content}`).join('\n')
+            : `Vault mein "${args.query}" se juda kuch nahi mila.`;
+          await reply(found);
+        } else if (callName === 'manage_shared_memory') {
+          if (args.mode === 'share') {
+            const { data: mem } = await supabase
+              .from('memory_bubbles')
+              .select('*')
+              .eq('user_phone', userPhone)
+              .ilike('item_title', `%${args.item_or_bubble}%`)
+              .single();
 
-          const cleanTarget = args.contact_phone.replace(/\D/g, '');
-          await supabase.from('shared_memories').insert({
-            owner_phone: userPhone,
-            recipient_phone: cleanTarget,
-            recipient_name: args.contact_name,
-            memory_id: mem.id,
-            is_active: true
-          });
+            if (!mem) return reply(`Vault mein "${args.item_or_bubble}" nahi mila. Pehle save karein!`);
+            if (!args.contact_phone) return reply(`Kripya ${args.contact_name} ka WhatsApp number country code (91...) ke sath batayein.`);
 
-          await sendWA(cleanTarget, `🔔 *Shared Memory Alert*\n${userPhone} ne aapke sath *${mem.item_title}* share kiya hai.\nDekhne ke liye *"Shared with me"* reply karein.`);
-          await reply(`🔗 *${mem.item_title}* privately *${args.contact_name}* ke sath share kar diya gaya hai.`);
-        } else if (args.mode === 'revoke') {
-          await supabase
-            .from('shared_memories')
-            .update({ is_active: false })
-            .eq('owner_phone', userPhone)
-            .ilike('recipient_name', `%${args.contact_name}%`);
-          await reply(`🚫 *${args.contact_name}* ke sath sharing revoke kar di gayi hai.`);
-        } else {
-          const { data: activeShares } = await supabase
-            .from('shared_memories')
-            .select('recipient_name, memory_bubbles(item_title)')
-            .eq('owner_phone', userPhone)
-            .eq('is_active', true);
+            const cleanTarget = args.contact_phone.replace(/\D/g, '');
+            await supabase.from('shared_memories').insert({
+              owner_phone: userPhone,
+              recipient_phone: cleanTarget,
+              recipient_name: args.contact_name,
+              memory_id: mem.id,
+              is_active: true
+            });
 
-          const summary = activeShares?.length
-            ? activeShares.map(s => `• *${s.memory_bubbles?.item_title}* -> *${s.recipient_name}*`).join('\n')
-            : 'Abhi koi active share nahi hai.';
-          await reply(`🔍 *Active Shared Memories:*\n\n${summary}`);
-        }
-      } else if (callName === 'create_reminder') {
-        await supabase.from('reminders').insert({
-          user_phone: userPhone,
-          target_phone: remoteJid,
-          task: args.task,
-          remind_at: args.remind_at,
-          is_dynamic: args.is_dynamic || false,
-          dynamic_query: args.dynamic_query || null,
-          sent: false
-        });
-        await reply(`⏰ Reminder set: *${args.task}* (${args.is_dynamic ? 'Dynamic Live Check' : 'Standard'})`);
-      } else if (callName === 'manage_calendar') {
-        if (args.action === 'create') {
+            await sendWA(cleanTarget, `🔔 *Shared Memory Alert*\n${userPhone} ne aapke sath *${mem.item_title}* share kiya hai.\nDekhne ke liye *"Shared with me"* reply karein.`);
+            await reply(`🔗 *${mem.item_title}* privately *${args.contact_name}* ke sath share kar diya gaya hai.`);
+          } else if (args.mode === 'revoke') {
+            await supabase
+              .from('shared_memories')
+              .update({ is_active: false })
+              .eq('owner_phone', userPhone)
+              .ilike('recipient_name', `%${args.contact_name}%`);
+            await reply(`🚫 *${args.contact_name}* ke sath sharing revoke kar di gayi hai.`);
+          } else {
+            const { data: activeShares } = await supabase
+              .from('shared_memories')
+              .select('recipient_name, memory_bubbles(item_title)')
+              .eq('owner_phone', userPhone)
+              .eq('is_active', true);
+
+            const summary = activeShares?.length
+              ? activeShares.map(s => `• *${s.memory_bubbles?.item_title}* -> *${s.recipient_name}*`).join('\n')
+              : 'Abhi koi active share nahi hai.';
+            await reply(`🔍 *Active Shared Memories:*\n\n${summary}`);
+          }
+        } else if (callName === 'create_reminder') {
           await supabase.from('reminders').insert({
             user_phone: userPhone,
             target_phone: remoteJid,
-            task: `📅 Calendar Event: ${args.title}`,
-            remind_at: args.start_time,
-            is_dynamic: false,
+            task: args.task,
+            remind_at: args.remind_at,
+            is_dynamic: args.is_dynamic || false,
+            dynamic_query: args.dynamic_query || null,
             sent: false
           });
-          await reply(`📅 Event scheduled: *${args.title}* at ${args.start_time}`);
-        } else {
-          const { data: events } = await supabase
-            .from('reminders')
-            .select('*')
-            .eq('user_phone', userPhone)
-            .eq('sent', false);
-          const list = events?.map(e => `• ${e.task} (${e.remind_at})`).join('\n') || 'Koi upcoming event nahi hai.';
-          await reply(`📅 *Your Schedule:*\n\n${list}`);
-        }
-      } else if (callName === 'manage_list_or_board') {
-        if (args.action === 'add') {
-          await supabase.from('lists_and_boards').insert({
-            user_phone: userPhone,
-            list_name: (args.list_name || 'tasks').toLowerCase(),
-            item_text: args.item_text,
-            priority: args.priority || 'medium',
-            status: 'todo'
-          });
-          await reply(`📝 *${args.item_text}* aapki *${args.list_name}* list mein add ho gaya hai.`);
-        } else {
-          const { data: items } = await supabase
-            .from('lists_and_boards')
-            .select('*')
-            .eq('user_phone', userPhone)
-            .ilike('list_name', `%${args.list_name}%`);
+          await reply(`⏰ Reminder set: *${args.task}* (${args.is_dynamic ? 'Dynamic Live Check' : 'Standard'})`);
+        } else if (callName === 'manage_calendar') {
+          if (args.action === 'create') {
+            await supabase.from('reminders').insert({
+              user_phone: userPhone,
+              target_phone: remoteJid,
+              task: `📅 Calendar Event: ${args.title}`,
+              remind_at: args.start_time,
+              is_dynamic: false,
+              sent: false
+            });
+            await reply(`📅 Event scheduled: *${args.title}* at ${args.start_time}`);
+          } else {
+            const { data: events } = await supabase
+              .from('reminders')
+              .select('*')
+              .eq('user_phone', userPhone)
+              .eq('sent', false);
+            const list = events?.map(e => `• ${e.task} (${e.remind_at})`).join('\n') || 'Koi upcoming event nahi hai.';
+            await reply(`📅 *Your Schedule:*\n\n${list}`);
+          }
+        } else if (callName === 'manage_list_or_board') {
+          if (args.action === 'add') {
+            await supabase.from('lists_and_boards').insert({
+              user_phone: userPhone,
+              list_name: (args.list_name || 'tasks').toLowerCase(),
+              item_text: args.item_text,
+              priority: args.priority || 'medium',
+              status: 'todo'
+            });
+            await reply(`📝 *${args.item_text}* aapki *${args.list_name}* list mein add ho gaya hai.`);
+          } else {
+            const { data: items } = await supabase
+              .from('lists_and_boards')
+              .select('*')
+              .eq('user_phone', userPhone)
+              .ilike('list_name', `%${args.list_name}%`);
 
-          const board = items?.map((i, idx) => `${idx + 1}. [${(i.status || 'TODO').toUpperCase()}] ${i.item_text} (${i.priority})`).join('\n') || 'List khali hai.';
-          await reply(`📋 *${args.list_name.toUpperCase()}:*\n\n${board}`);
-        }
-      } else if (callName === 'generate_pdf_file') {
-        const cleanName = args.filename.endsWith('.pdf') ? args.filename : `${args.filename}.pdf`;
-        const filePath = `./${cleanName}`;
-        const doc = new PDFDocument();
-        const stream = fs.createWriteStream(filePath);
-        doc.pipe(stream);
-        doc.fontSize(20).text(args.title, { underline: true });
-        doc.moveDown();
-        doc.fontSize(12).text(args.body_content);
-        doc.end();
+            const board = items?.map((i, idx) => `${idx + 1}. [${(i.status || 'TODO').toUpperCase()}] ${i.item_text} (${i.priority})`).join('\n') || 'List khali hai.';
+            await reply(`📋 *${args.list_name.toUpperCase()}:*\n\n${board}`);
+          }
+        } else if (callName === 'generate_pdf_file') {
+          const cleanName = args.filename.endsWith('.pdf') ? args.filename : `${args.filename}.pdf`;
+          const filePath = `./${cleanName}`;
+          const doc = new PDFDocument();
+          const stream = fs.createWriteStream(filePath);
+          doc.pipe(stream);
+          doc.fontSize(20).text(args.title, { underline: true });
+          doc.moveDown();
+          doc.fontSize(12).text(args.body_content);
+          doc.end();
 
-        stream.on('finish', async () => {
-          await sock.sendMessage(remoteJid, {
-            document: fs.readFileSync(filePath),
-            mimetype: 'application/pdf',
-            fileName: cleanName,
-            caption: `📄 Aapki file *${args.title}* ready hai.`
+          stream.on('finish', async () => {
+            await sock.sendMessage(remoteJid, {
+              document: fs.readFileSync(filePath),
+              mimetype: 'application/pdf',
+              fileName: cleanName,
+              caption: `📄 Aapki file *${args.title}* ready hai.`
+            });
+            fs.unlinkSync(filePath);
           });
-          fs.unlinkSync(filePath);
-        });
-      } else if (callName === 'web_agent_search_and_book') {
-        if (args.task_type === 'browser_screenshot' && args.search_query.startsWith('http')) {
-          const browser = await chromium.launch({ executablePath, headless: true });
-          const page = await browser.newPage();
-          await page.goto(args.search_query, { waitUntil: 'domcontentloaded' });
-          const shotPath = `./shot_${Date.now()}.png`;
-          await page.screenshot({ path: shotPath });
-          await browser.close();
+        } else if (callName === 'web_agent_search_and_book') {
+          if (args.task_type === 'browser_screenshot' && args.search_query.startsWith('http')) {
+            const browser = await chromium.launch({ executablePath, headless: true });
+            const page = await browser.newPage();
+            await page.goto(args.search_query, { waitUntil: 'domcontentloaded' });
+            const shotPath = `./shot_${Date.now()}.png`;
+            await page.screenshot({ path: shotPath });
+            await browser.close();
 
-          await sock.sendMessage(remoteJid, {
-            image: fs.readFileSync(shotPath),
-            caption: `🌐 Live Web Agent view: ${args.search_query}`
-          });
-          fs.unlinkSync(shotPath);
-        } else {
-          const summaryMsg = await askGroq(
-            `Provide helpful, accurate information and options for: ${args.search_query}. Format concisely for WhatsApp.`,
-            false
-          );
-          await reply(`🌐 *Search Result:*\n\n${summaryMsg.content}`);
+            await sock.sendMessage(remoteJid, {
+              image: fs.readFileSync(shotPath),
+              caption: `🌐 Live Web Agent view: ${args.search_query}`
+            });
+            fs.unlinkSync(shotPath);
+          } else {
+            const summaryMsg = await askGroq(
+              `Provide helpful, accurate information and options for: ${args.search_query}. Format concisely for WhatsApp.`,
+              false
+            );
+            await reply(`🌐 *Search Result:*\n\n${summaryMsg.content}`);
+          }
+        } else if (callName === 'run_code_sandbox') {
+          const result = vm.runInNewContext(args.code, {}, { timeout: 2000 });
+          await reply(`💻 *Sandbox Output:*\n\`\`\`\n${String(result)}\n\`\`\``);
         }
-      } else if (callName === 'run_code_sandbox') {
-        const result = vm.runInNewContext(args.code, {}, { timeout: 2000 });
-        await reply(`💻 *Sandbox Output:*\n\`\`\`\n${String(result)}\n\`\`\``);
+
+      } catch (err) {
+        console.error('❌ Error:', err.message);
+        await reply(`⚠️ Error aaya: ${err.message}`);
       }
-
-    } catch (err) {
-      console.error('❌ Error:', err.message);
-      await reply(`⚠️ Error aaya: ${err.message}`);
-    }
-  });
+    });
+  } catch (err) {
+    isConnecting = false;
+    console.error('StartBot Error:', err.message);
+    setTimeout(startBot, 5000);
+  }
 }
 
 cron.schedule('* * * * *', async () => {
