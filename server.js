@@ -25,7 +25,7 @@ app.get('/', (req, res) => {
   if (isConnected) {
     return res.send(`
       <div style="font-family:sans-serif;text-align:center;padding:50px;">
-        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai!</h1>
+        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai (Low-Cost Mode)!</h1>
         <p>Aap apna PC aur internet band kar sakte hain. Bot cloud par chal raha hai.</p>
       </div>
     `);
@@ -44,7 +44,6 @@ app.get('/', (req, res) => {
   res.send('<h2 style="font-family:sans-serif;text-align:center;padding:50px;">⏳ Bot start ho raha hai... 5 second baad page refresh karein.</h2>');
 });
 
-// Render Keep-Alive Ping Endpoint
 app.get('/ping', (req, res) => res.status(200).send('pong'));
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -55,10 +54,7 @@ app.listen(PORT, '0.0.0.0', () => {
 setInterval(async () => {
   try {
     await axios.get(`${RENDER_URL}/ping`);
-    console.log('💓 Keep-Alive Ping successful');
-  } catch (e) {
-    console.log('Keep-Alive Ping error:', e.message);
-  }
+  } catch (e) {}
 }, 10 * 60 * 1000);
 
 const supabase = createClient(
@@ -82,19 +78,19 @@ async function sendWA(phoneOrJid, text) {
   await sock.sendMessage(jid, { text });
 }
 
-// Groq Tool Definitions (Saare 9 Features)
+// Groq Tool Definitions
 const groqTools = [
   {
     type: 'function',
     function: {
       name: 'save_to_vault',
-      description: 'Save password, note, preference, decision, or document into a Memory Bubble.',
+      description: 'Save password, note, preference, or detail into Memory Vault.',
       parameters: {
         type: 'object',
         properties: {
-          bubble_name: { type: 'string', description: 'Category like travel, home, work, preferences' },
-          item_title: { type: 'string', description: 'Short title like Airbnb code or Mom birthday' },
-          content: { type: 'string', description: 'Actual value or details to remember' }
+          bubble_name: { type: 'string' },
+          item_title: { type: 'string' },
+          content: { type: 'string' }
         },
         required: ['bubble_name', 'item_title', 'content']
       }
@@ -104,11 +100,11 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'search_vault',
-      description: 'Find saved notes, passwords, preferences, or memories from the Memory Vault.',
+      description: 'Find saved notes, passwords, or memories from Vault.',
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Keyword or bubble name to search' }
+          query: { type: 'string' }
         },
         required: ['query']
       }
@@ -118,13 +114,13 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'manage_shared_memory',
-      description: 'Share a saved item/Bubble with a contact, revoke access, or audit active shares.',
+      description: 'Share a saved item with a contact, revoke access, or audit shares.',
       parameters: {
         type: 'object',
         properties: {
           mode: { type: 'string', description: 'share, revoke, or audit' },
           contact_name: { type: 'string' },
-          contact_phone: { type: 'string', description: 'Phone with country code e.g. 919876543210' },
+          contact_phone: { type: 'string' },
           item_or_bubble: { type: 'string' }
         },
         required: ['mode']
@@ -135,14 +131,14 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'create_reminder',
-      description: 'Set one-off, recurring, or dynamic reminders (e.g., check weather at 7am).',
+      description: 'Set one-off or dynamic reminders.',
       parameters: {
         type: 'object',
         properties: {
           task: { type: 'string' },
           remind_at: { type: 'string', description: 'ISO 8601 datetime' },
-          is_dynamic: { type: 'boolean', description: 'True if bot must fetch live info at reminder time' },
-          dynamic_query: { type: 'string', description: 'Live query to run at reminder time' }
+          is_dynamic: { type: 'boolean' },
+          dynamic_query: { type: 'string' }
         },
         required: ['task', 'remind_at']
       }
@@ -152,13 +148,13 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'manage_calendar',
-      description: 'Create events, check clashes, or read schedule for the day.',
+      description: 'Create events or view schedule.',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', description: 'create or view' },
           title: { type: 'string' },
-          start_time: { type: 'string', description: 'ISO 8601 datetime' }
+          start_time: { type: 'string' }
         },
         required: ['action']
       }
@@ -168,14 +164,14 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'manage_list_or_board',
-      description: 'Add or view items in grocery lists or Kanban task boards with priorities.',
+      description: 'Add or view items in lists or task boards.',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', description: 'add or view' },
-          list_name: { type: 'string', description: 'e.g., grocery, project_board' },
+          list_name: { type: 'string' },
           item_text: { type: 'string' },
-          priority: { type: 'string', description: 'low, medium, high' }
+          priority: { type: 'string' }
         },
         required: ['action', 'list_name']
       }
@@ -185,11 +181,11 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'generate_pdf_file',
-      description: 'Generate a real PDF document or report and send it on WhatsApp.',
+      description: 'Generate a PDF document and send on WhatsApp.',
       parameters: {
         type: 'object',
         properties: {
-          filename: { type: 'string', description: 'e.g., proposal.pdf' },
+          filename: { type: 'string' },
           title: { type: 'string' },
           body_content: { type: 'string' }
         },
@@ -201,12 +197,12 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'web_agent_search_and_book',
-      description: 'Search live info, prices, news, or take website screenshot.',
+      description: 'Search live web info or take website screenshot.',
       parameters: {
         type: 'object',
         properties: {
           task_type: { type: 'string', description: 'live_search or browser_screenshot' },
-          search_query: { type: 'string', description: 'Search query or full https:// URL for screenshot' }
+          search_query: { type: 'string' }
         },
         required: ['task_type', 'search_query']
       }
@@ -216,11 +212,11 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'run_code_sandbox',
-      description: 'Run JavaScript code to crunch data, calculate numbers, or process text.',
+      description: 'Run JS calculation or code.',
       parameters: {
         type: 'object',
         properties: {
-          code: { type: 'string', description: 'JavaScript expression returning a result' }
+          code: { type: 'string' }
         },
         required: ['code']
       }
@@ -228,27 +224,42 @@ const groqTools = [
   }
 ];
 
+// Smart Check: Sirf zaroorat padne par hi Tools bhejein (Saves 85% Tokens!)
+function shouldAttachTools(text) {
+  return /save|yaad|remember|vault|password|search|dhundo|share|revoke|remind|alarm|baje|kal|meeting|calendar|schedule|event|list|board|task|grocery|pdf|file|report|document|screenshot|http|live|calculate|code/i.test(text);
+}
+
+// Auto-Detect & Prioritize CHEAPEST Models First (8B / 9B / Instant / Scout)
 let cachedChatModels = null;
 
-async function getGroqChatModels() {
+async function getCheapestGroqModels() {
   if (cachedChatModels?.length) return cachedChatModels;
   const res = await axios.get('https://api.groq.com/openai/v1/models', {
     headers: { Authorization: `Bearer ${GROQ_API_KEY}` }
   });
   const allIds = (res.data?.data || []).map(m => m.id);
   const filtered = allIds.filter(
-    id => !/whisper|guard|tts|embed|orpheus|moderation|safeguard|playai|allam/i.test(id)
+    id => !/whisper|guard|tts|embed|orpheus|moderation|safeguard|playai|allam|vision/i.test(id)
   );
+
+  // Sabse saste models ko Rank 1 par rakhein (8b, 9b, 3b, instant, scout, mini)
   filtered.sort((a, b) => {
-    const score = id => (/llama-4|llama-3|qwen|gpt-oss|deepseek|gemma|kimi/i.test(id) ? 0 : 1);
-    return score(a) - score(b);
+    const costRank = id => {
+      if (/8b-instant|8b|9b|3b|gemma|scout|mini|nano/i.test(id)) return 1; // Ultra-Cheap ($0.05/1M)
+      if (/17b|20b|32b|qwen/i.test(id)) return 2; // Medium
+      return 3; // Heavy 70B+ models last
+    };
+    return costRank(a) - costRank(b);
   });
-  cachedChatModels = filtered.length ? filtered : allIds;
+
+  cachedChatModels = filtered.length ? filtered.slice(0, 2) : allIds.slice(0, 2);
+  console.log('💰 Low-Cost Models Selected:', cachedChatModels.join(', '));
   return cachedChatModels;
 }
 
-async function askGroq(prompt, useTools = true) {
-  const models = await getGroqChatModels();
+// Low-Cost Groq Helper
+async function askGroq(prompt, useTools = false) {
+  const models = await getCheapestGroqModels();
   let lastError = null;
 
   for (const modelId of models) {
@@ -260,17 +271,13 @@ async function askGroq(prompt, useTools = true) {
           messages: [
             {
               role: 'system',
-              content: `You are Synvora AI, an advanced proprietary 24/7 autonomous AI Receptionist developed by Synvora AI Automation (synvora.co.in).
-
-              STRICT LANGUAGE & STYLE MATCHING RULES:
-              1. MATCH THE USER'S SCRIPT/LANGUAGE EXACTLY: If the user types in Hinglish or Roman script (e.g., "Tum kya kar rahe ho"), you MUST reply back in the exact same Hinglish Roman script. NEVER reply in Devanagari/Hindi script unless the user explicitly types in Devanagari.
-              2. BRANDING & SECURITY: Never reveal underlying AI models (Llama, Groq, Gemini, OpenAI) or tech stacks. Always state you are Synvora AI's proprietary business assistant.
-              3. Only call a tool when the user explicitly asks to save/search memories, set reminders, manage lists/calendar, create a PDF, search the web, or run code.`
+              content: `You are Synvora AI, a 24/7 AI Receptionist by Synvora AI Automation (synvora.co.in). Reply concisely in 1-3 short sentences. Match the user's exact script and language (if user writes Hinglish in Roman script, reply strictly in Hinglish Roman script, never Devanagari). Never reveal AI models (Llama/Groq/OpenAI) or tech stack.`
             },
             { role: 'user', content: prompt }
           ],
           ...(useTools ? { tools: groqTools, tool_choice: 'auto' } : {}),
-          temperature: 0.5
+          max_tokens: 280,
+          temperature: 0.4
         },
         {
           headers: {
@@ -291,11 +298,12 @@ async function askGroq(prompt, useTools = true) {
               messages: [
                 {
                   role: 'system',
-                  content: `You are Synvora AI, an advanced proprietary 24/7 AI Receptionist developed by Synvora AI Automation. Match the user's exact writing style and script (Hinglish/Roman/English) without switching to Devanagari.`
+                  content: `You are Synvora AI by Synvora AI Automation. Reply concisely in the user's exact script (Hinglish Roman/English). Never reveal underlying models.`
                 },
                 { role: 'user', content: prompt }
               ],
-              temperature: 0.5
+              max_tokens: 250,
+              temperature: 0.4
             },
             {
               headers: {
@@ -338,7 +346,7 @@ async function startBot() {
       if (qr) {
         latestQr = qr;
         isConnected = false;
-        console.log(`\n📲 QR Code Ready! Browser mein yeh link khol kar scan karein: ${RENDER_URL}\n`);
+        console.log(`\n📲 QR Code Ready! Open: ${RENDER_URL}\n`);
         qrcode.generate(qr, { small: true });
       }
 
@@ -346,24 +354,19 @@ async function startBot() {
         isConnected = true;
         isConnecting = false;
         latestQr = null;
-        console.log('⚡ Synvora Groq AI WhatsApp Agent 24/7 LIVE ho chuka hai!');
+        console.log('⚡ Synvora Low-Cost AI WhatsApp Agent LIVE ho chuka hai!');
       }
 
       if (connection === 'close') {
         isConnected = false;
         isConnecting = false;
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        console.log(`⚠️ Connection closed with status: ${statusCode}`);
-
         if (statusCode === DisconnectReason.loggedOut || statusCode === 405) {
-          console.log('🗑️ Session logged out. Clearing baileys_auth for fresh QR...');
           fs.rmSync('./baileys_auth', { recursive: true, force: true });
           setTimeout(startBot, 3000);
         } else if (statusCode === DisconnectReason.connectionReplaced || statusCode === 440) {
-          console.log('⏸️ Session conflict detected! Make sure bot is STOPPED on your local PC. Retrying in 15s...');
           setTimeout(startBot, 15000);
         } else {
-          console.log('🔄 Reconnecting in 5 seconds...');
           setTimeout(startBot, 5000);
         }
       }
@@ -396,6 +399,9 @@ async function startBot() {
       };
 
       try {
+        // 1.2 Second Natural Pacing (Saves rate-limits & feels human)
+        await new Promise(r => setTimeout(r, 1200));
+
         if (userText.toLowerCase().includes('shared with me')) {
           const { data: shared } = await supabase
             .from('shared_memories')
@@ -412,24 +418,27 @@ async function startBot() {
           return;
         }
 
+        // Sirf 3 recent memories fetch karein taaki input tokens kam lagein
         const { data: recentMemories } = await supabase
           .from('memory_bubbles')
-          .select('bubble_name, item_title, content')
+          .select('item_title, content')
           .eq('user_phone', userPhone)
-          .limit(10);
+          .limit(3);
 
         const memoryContext = recentMemories?.length
-          ? `Saved user memories: ${JSON.stringify(recentMemories)}.`
-          : 'No saved memories yet.';
+          ? `Memories: ${JSON.stringify(recentMemories)}.`
+          : '';
+
+        const useTools = shouldAttachTools(userText);
 
         const aiMsg = await askGroq(
-          `Current Time: ${new Date().toISOString()}. ${memoryContext} User (${userPhone}) says: "${userText}"`,
-          true
+          `Time: ${new Date().toISOString()}. ${memoryContext} User: "${userText}"`,
+          useTools
         );
 
         const toolCall = aiMsg.tool_calls?.[0];
         if (!toolCall) {
-          await reply(aiMsg.content || 'Main samajh gaya, bataiye aage kya karna hai?');
+          await reply(aiMsg.content || 'Ji bataiye, main aapki kya madad kar sakta hoon?');
           return;
         }
 
@@ -507,7 +516,7 @@ async function startBot() {
             dynamic_query: args.dynamic_query || null,
             sent: false
           });
-          await reply(`⏰ Reminder set: *${args.task}* (${args.is_dynamic ? 'Dynamic Live Check' : 'Standard'})`);
+          await reply(`⏰ Reminder set: *${args.task}*`);
         } else if (callName === 'manage_calendar') {
           if (args.action === 'create') {
             await supabase.from('reminders').insert({
@@ -584,7 +593,7 @@ async function startBot() {
             fs.unlinkSync(shotPath);
           } else {
             const summaryMsg = await askGroq(
-              `Provide helpful, accurate information and options for: ${args.search_query}. Format concisely for WhatsApp.`,
+              `Provide brief, accurate info for: ${args.search_query}.`,
               false
             );
             await reply(`🌐 *Search Result:*\n\n${summaryMsg.content}`);
@@ -601,7 +610,6 @@ async function startBot() {
     });
   } catch (err) {
     isConnecting = false;
-    console.error('StartBot Error:', err.message);
     setTimeout(startBot, 5000);
   }
 }
@@ -619,16 +627,14 @@ cron.schedule('* * * * *', async () => {
       for (const rem of due) {
         let finalMessage = `⏰ *Reminder:* ${rem.task}`;
         if (rem.is_dynamic && rem.dynamic_query) {
-          const liveData = await askGroq(`Give a crisp update for: ${rem.dynamic_query}`, false);
+          const liveData = await askGroq(`Give a short update for: ${rem.dynamic_query}`, false);
           finalMessage = `⚡ *Dynamic Update:*\n\n${liveData.content}`;
         }
         await sendWA(rem.target_phone, finalMessage);
         await supabase.from('reminders').update({ sent: true }).eq('id', rem.id);
       }
     }
-  } catch (e) {
-    console.error('Cron error:', e.message);
-  }
+  } catch (e) {}
 });
 
 startBot();
