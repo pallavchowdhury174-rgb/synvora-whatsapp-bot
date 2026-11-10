@@ -8,7 +8,14 @@ import fs from 'fs';
 import vm from 'vm';
 import { chromium } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
+import express from 'express';
 import 'dotenv/config';
+
+// Render ke liye Dummy Web Server (Port Binding Fix)
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Synvora AI Bot is Running 24/7!'));
+app.listen(PORT, () => console.log(`🌐 Dummy Web Server running on port ${PORT}`));
 
 const supabase = createClient(
   process.env.SUPABASE_URL?.trim(),
@@ -200,7 +207,7 @@ async function getGroqChatModels() {
   return cachedChatModels;
 }
 
-// Ultra-Fast Groq API Helper with Strict Script/Language Matching
+// Ultra-Fast Groq API Helper with Strict Script & Language Matching
 async function askGroq(prompt, useTools = true) {
   const models = await getGroqChatModels();
   let lastError = null;
