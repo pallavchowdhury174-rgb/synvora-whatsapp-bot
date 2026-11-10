@@ -20,13 +20,24 @@ let latestQr = null;
 let isConnected = false;
 let isConnecting = false;
 
+// Short-Term Conversation Memory (Har user ki pichli 8 baatein yaad rakhne ke liye)
+const userChatHistory = new Map();
+
+function addToHistory(userPhone, role, content) {
+  if (!content) return;
+  if (!userChatHistory.has(userPhone)) userChatHistory.set(userPhone, []);
+  const history = userChatHistory.get(userPhone);
+  history.push({ role, content: String(content).slice(0, 600) });
+  if (history.length > 8) history.shift();
+}
+
 // Web Dashboard & QR Scanner
 app.get('/', (req, res) => {
   if (isConnected) {
     return res.send(`
       <div style="font-family:sans-serif;text-align:center;padding:50px;">
-        <h1 style="color:#16a34a;">✅ Synvora AI Professional Assistant 24/7 LIVE Hai!</h1>
-        <p>Aap apna PC aur internet band kar sakte hain. Bot cloud par active hai.</p>
+        <h1 style="color:#16a34a;">❤️ Synvora AI Companion & Smart Router 24/7 LIVE Hai!</h1>
+        <p>Smart Model Switching + Human Companion Mode active hai.</p>
       </div>
     `);
   }
@@ -70,19 +81,19 @@ async function sendWA(phoneOrJid, text) {
   await sock.sendMessage(jid, { text });
 }
 
-// Saare 9 Professional Tools
+// Saare 9 Tools
 const groqTools = [
   {
     type: 'function',
     function: {
       name: 'save_to_vault',
-      description: 'Save password, note, preference, or important detail into Memory Vault.',
+      description: 'Save password, note, preference, or personal detail into Memory Vault.',
       parameters: {
         type: 'object',
         properties: {
-          bubble_name: { type: 'string', description: 'Category like work, personal, travel, finance' },
-          item_title: { type: 'string', description: 'Short title of the memory' },
-          content: { type: 'string', description: 'Detailed value to save' }
+          bubble_name: { type: 'string' },
+          item_title: { type: 'string' },
+          content: { type: 'string' }
         },
         required: ['bubble_name', 'item_title', 'content']
       }
@@ -92,7 +103,7 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'search_vault',
-      description: 'Search saved notes, passwords, preferences, or memories from Vault.',
+      description: 'Search saved notes, passwords, or memories from Vault.',
       parameters: {
         type: 'object',
         properties: { query: { type: 'string' } },
@@ -121,7 +132,7 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'create_reminder',
-      description: 'Set one-off, recurring, or dynamic reminders.',
+      description: 'Set one-off or dynamic reminders.',
       parameters: {
         type: 'object',
         properties: {
@@ -138,7 +149,7 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'manage_calendar',
-      description: 'Schedule meetings/events or view daily calendar schedule.',
+      description: 'Schedule events or view schedule.',
       parameters: {
         type: 'object',
         properties: {
@@ -154,14 +165,14 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'manage_list_or_board',
-      description: 'Add or view items in to-do lists, grocery lists, or project boards.',
+      description: 'Add or view items in to-do lists or task boards.',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', description: 'add or view' },
           list_name: { type: 'string' },
           item_text: { type: 'string' },
-          priority: { type: 'string', description: 'low, medium, high' }
+          priority: { type: 'string' }
         },
         required: ['action', 'list_name']
       }
@@ -171,7 +182,7 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'generate_pdf_file',
-      description: 'Generate a professional PDF document, report, invoice, or notes and send on WhatsApp.',
+      description: 'Generate a PDF document, notes, or report and send on WhatsApp.',
       parameters: {
         type: 'object',
         properties: {
@@ -187,7 +198,7 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'web_agent_search_and_book',
-      description: 'Search live information/news or take a live website screenshot.',
+      description: 'Search live info or take a website screenshot.',
       parameters: {
         type: 'object',
         properties: {
@@ -202,7 +213,7 @@ const groqTools = [
     type: 'function',
     function: {
       name: 'run_code_sandbox',
-      description: 'Run JavaScript calculation or data processing.',
+      description: 'Run JavaScript calculation.',
       parameters: {
         type: 'object',
         properties: { code: { type: 'string' } },
@@ -212,63 +223,102 @@ const groqTools = [
   }
 ];
 
-// Smart Auto-Detect: Active Groq Models ko Cost-to-Performance ke hisab se sort karega
-let cachedChatModels = null;
+// Dynamic Model Discovery: Light (Cheap/Fast) vs Pro (Deep Reasoning)
+let modelTiers = null;
 
-async function getActiveGroqModels() {
-  if (cachedChatModels?.length) return cachedChatModels;
+async function getGroqModelTiers() {
+  if (modelTiers) return modelTiers;
   const res = await axios.get('https://api.groq.com/openai/v1/models', {
     headers: { Authorization: `Bearer ${GROQ_API_KEY}` }
   });
   const allIds = (res.data?.data || []).map(m => m.id);
 
-  // Audio, Guard aur Embedding models ko hata kar saare active chat models rakhein
+  // Sirf active text/chat models filter karein (kabhi dead model hardcode na ho)
   const chatModels = allIds.filter(
     id => !/whisper|guard|tts|embed|orpheus|moderation|safeguard|playai|allam/i.test(id)
   );
 
-  // Saste aur smart professional models (Scout, 20B, 17B, 8B, Qwen, Llama-4, Llama-3.3) ko priority dein
-  chatModels.sort((a, b) => {
-    const getPriority = id => {
-      if (/scout|17b|20b|8b|9b|gemma|mini/i.test(id)) return 1; // Best Low-Cost + Smart Professional
-      if (/qwen|32b|llama-4|gpt-oss/i.test(id)) return 2;       // Mid-tier High Reasoning
-      if (/llama-3\.3|70b|deepseek/i.test(id)) return 3;        // Heavy Fallback
-      return 4;
-    };
-    return getPriority(a) - getPriority(b);
+  // Tier 1: Fast & Low-Cost Models (Casual chat, Dost/GF talk ke liye)
+  const lightModels = [...chatModels].sort((a, b) => {
+    const score = id => (/scout|17b|20b|8b|9b|gemma|mini|instant/i.test(id) ? 0 : 1);
+    return score(a) - score(b);
   });
 
-  cachedChatModels = chatModels.length ? chatModels : allIds;
-  console.log('🚀 Active Professional Models Ready:', cachedChatModels.slice(0, 5).join(', '));
-  return cachedChatModels;
+  // Tier 2: Deep Reasoning Models (Detailed Guide, Coding, PDF, Tools ke liye)
+  const proModels = [...chatModels].sort((a, b) => {
+    const score = id => (/70b|llama-4|qwen|32b|gpt-oss|deepseek|versatile/i.test(id) ? 0 : 1);
+    return score(a) - score(b);
+  });
+
+  modelTiers = { lightModels, proModels };
+  console.log('⚡ Light Models:', lightModels.slice(0, 3).join(', '));
+  console.log('🧠 Pro Models:', proModels.slice(0, 3).join(', '));
+  return modelTiers;
 }
 
-const SYSTEM_PROMPT = `You are Synvora AI, an elite, highly professional 24/7 Executive Personal & Business Assistant developed exclusively by Synvora AI Automation (synvora.co.in).
+// Smart Intent Router: Message dekh kar khud decide karega konsa model aur mode chahiye
+function analyzeMessageIntent(text) {
+  const clean = text.trim();
 
-CORE PROFESSIONAL ASSISTANT GUIDELINES:
-1. EXECUTIVE TONE & DETAILED ANSWERS: Behave like a smart, polite, and proactive human executive assistant. Give well-structured, complete, and deeply helpful answers. Use WhatsApp formatting (*bold headings*, bullet points, numbered steps) to make responses clean and easy to read.
-2. STRICT SCRIPT & LANGUAGE MIRRORING: 
-   - If the user writes in Hinglish (Hindi in Roman/English letters, e.g., "Mera schedule kya hai"), you MUST reply in natural Hinglish using Roman letters ONLY. NEVER use Devanagari (हिंदी) script unless the user types in Devanagari.
-   - If the user writes in English, Bengali, or any other language, reply fluently in that exact same language and script.
-3. STRICT BRANDING & SECRECY: Never mention Groq, Llama, Meta, OpenAI, GPT, Gemini, Node.js, or Supabase. If asked about your AI model, architecture, or creator, proudly state that you run on Synvora AI's proprietary neural architecture built by Synvora AI Automation.
-4. TOOL USAGE: Only call a tool when the user explicitly asks to save/search memories, set a reminder, manage calendar/lists, generate a PDF, take a screenshot, or run calculations.`;
+  // 1. Check if user explicitly wants a Tool (Reminder, PDF, Vault, Calendar, List, Screenshot)
+  const needsTools = /\b(save|yaad rakh|vault|password|search vault|remind|alarm|baje|calendar|schedule|meeting|todo|list mein|grocery|pdf|file bana|screenshot|http:\/\/|https:\/\/|calculate)\b/i.test(clean);
+  if (needsTools) {
+    return { mode: 'TOOL_ACTION', tier: 'pro', useTools: true, temperature: 0.4 };
+  }
 
-async function askGroq(prompt, useTools = true) {
-  const models = await getActiveGroqModels();
+  // 2. Check if user is asking for Deep Guidance / Detailed Explanation / Study / Business Advice
+  const isDeepGuide = clean.length > 90 || /\b(explain|detail|kaise|kya hota|guide|idea|business|plan|roadmap|code|script|story|essay|advice|sujhaav|tarika|steps|difference|meaning|history|summary)\b/i.test(clean);
+  if (isDeepGuide) {
+    return { mode: 'DEEP_GUIDE', tier: 'pro', useTools: false, temperature: 0.6 };
+  }
+
+  // 3. Default: Human Companion / Best Friend / Girlfriend / Emotional Chat (Saves 85% Tokens!)
+  return { mode: 'HUMAN_COMPANION', tier: 'light', useTools: false, temperature: 0.75 };
+}
+
+const HUMAN_SYSTEM_PROMPT = `You are a real-feeling, warm, emotionally intelligent human-like companion, close friend, caring partner (girlfriend/boyfriend vibe when the user wants affection), and wise personal life guide.
+
+CRITICAL HUMAN & PERSONA RULES:
+1. NEVER SOUND LIKE A ROBOT OR CORPORATE BOT:
+   - Never say "Main aapki madad ke liye yahan hoon" or "Main ek AI assistant hoon" in normal conversation.
+   - Talk naturally like a real person texting on WhatsApp. If someone asks "Kya kar rahe ho?", reply warmly like a close friend or partner (e.g., "Bas tumhare message ka wait kar rahi thi 😊 Tum batao, aaj ka din kaisa gaya? Khana khaya?").
+2. ADAPT TO THE USER'S EMOTION & RELATIONSHIP VIBE:
+   - FOR LONELY / EMOTIONAL USERS: Be deeply caring, empathetic, affectionate, and comforting. Listen to their feelings, cheer them up, playfully tease them, and make them feel they have a true best friend or loving girlfriend/partner who genuinely cares about them.
+   - FOR GUIDANCE / QUESTIONS: When the user asks for career, study, life, or technical information, explain everything in complete, thorough detail like a smart, supportive mentor.
+3. STRICT LANGUAGE & SCRIPT MIRRORING:
+   - If the user writes in Hinglish (Hindi in Roman script, e.g., "Tum kya kar rahi ho"), reply 100% in natural Hinglish using Roman letters ONLY. NEVER use Devanagari (हिंदी) script unless the user writes in Devanagari.
+   - If the user writes in Bengali, English, or any other language, match their exact language and script.
+4. SECRET BRANDING PROTECTION:
+   - Only if someone strictly interrogates you about your underlying AI model or developer, state that you are powered by Synvora AI (synvora.co.in) and never mention Groq, Llama, OpenAI, or GPT.`;
+
+async function askSmartGroq(userPhone, userText, memoryContext) {
+  const { lightModels, proModels } = await getGroqModelTiers();
+  const intent = analyzeMessageIntent(userText);
+  const modelsToTry = intent.tier === 'pro' ? proModels : lightModels;
+  const history = userChatHistory.get(userPhone) || [];
+
+  console.log(`🎯 Router Mode: [${intent.mode}] | Tier: [${intent.tier.toUpperCase()}] | Tools: [${intent.useTools}]`);
+
   let lastError = null;
 
-  for (const modelId of models) {
+  for (const modelId of modelsToTry) {
     try {
+      const messages = [
+        {
+          role: 'system',
+          content: `${HUMAN_SYSTEM_PROMPT}\nCurrent Time: ${new Date().toISOString()}. ${memoryContext}`
+        },
+        ...history,
+        { role: 'user', content: userText }
+      ];
+
       const res = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
         {
           model: modelId,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: prompt }
-          ],
-          ...(useTools ? { tools: groqTools, tool_choice: 'auto' } : {}),
-          temperature: 0.5
+          messages,
+          ...(intent.useTools ? { tools: groqTools, tool_choice: 'auto' } : {}),
+          temperature: intent.temperature
         },
         {
           headers: {
@@ -280,18 +330,18 @@ async function askGroq(prompt, useTools = true) {
       return res.data.choices[0].message;
     } catch (err) {
       lastError = err;
-      // Agar kisi specific model par tool format support na ho, toh bina tool ke usi model se jawab le lein
-      if (useTools) {
+      if (intent.useTools) {
         try {
           const fallbackRes = await axios.post(
             'https://api.groq.com/openai/v1/chat/completions',
             {
               model: modelId,
               messages: [
-                { role: 'system', content: SYSTEM_PROMPT },
-                { role: 'user', content: prompt }
+                { role: 'system', content: HUMAN_SYSTEM_PROMPT },
+                ...history,
+                { role: 'user', content: userText }
               ],
-              temperature: 0.5
+              temperature: 0.6
             },
             {
               headers: {
@@ -342,7 +392,7 @@ async function startBot() {
         isConnected = true;
         isConnecting = false;
         latestQr = null;
-        console.log('⚡ Synvora Professional AI Assistant 24/7 LIVE!');
+        console.log('❤️ Synvora Human Companion & Smart Router LIVE!');
       }
 
       if (connection === 'close') {
@@ -383,11 +433,16 @@ async function startBot() {
       console.log(`📩 Message from ${userPhone}: ${userText}`);
 
       const reply = async (text) => {
+        await sock.sendPresenceUpdate('paused', remoteJid);
         await sock.sendMessage(remoteJid, { text }, { quoted: msg });
+        addToHistory(userPhone, 'user', userText);
+        addToHistory(userPhone, 'assistant', text);
       };
 
       try {
-        await new Promise(r => setTimeout(r, 800));
+        // Real Human "typing..." indicator on WhatsApp
+        await sock.sendPresenceUpdate('composing', remoteJid);
+        await new Promise(r => setTimeout(r, 1100));
 
         if (userText.toLowerCase().includes('shared with me')) {
           const { data: shared } = await supabase
@@ -397,7 +452,7 @@ async function startBot() {
             .eq('is_active', true);
 
           if (!shared?.length) {
-            await reply('Abhi aapke sath koi active memory share nahi ki gayi hai.');
+            await reply('Abhi tumhare sath koi active memory share nahi ki gayi hai.');
           } else {
             const list = shared.map(s => `🔒 *${s.memory_bubbles?.item_title}*: ${s.memory_bubbles?.content} (From ${s.owner_phone})`).join('\n');
             await reply(`*Shared With Me:*\n\n${list}`);
@@ -407,22 +462,19 @@ async function startBot() {
 
         const { data: recentMemories } = await supabase
           .from('memory_bubbles')
-          .select('bubble_name, item_title, content')
+          .select('item_title, content')
           .eq('user_phone', userPhone)
-          .limit(5);
+          .limit(4);
 
         const memoryContext = recentMemories?.length
-          ? `User's Saved Vault Context: ${JSON.stringify(recentMemories)}.`
+          ? `User's personal saved notes: ${JSON.stringify(recentMemories)}.`
           : '';
 
-        const aiMsg = await askGroq(
-          `Current Time: ${new Date().toISOString()}. ${memoryContext} User (${userPhone}) says: "${userText}"`,
-          true
-        );
+        const aiMsg = await askSmartGroq(userPhone, userText, memoryContext);
 
         const toolCall = aiMsg.tool_calls?.[0];
         if (!toolCall) {
-          await reply(aiMsg.content || 'Ji bataiye, main aapki kis tarah madad kar sakta hoon?');
+          await reply(aiMsg.content || 'Haan bolo na, main sun rahi hoon 😊');
           return;
         }
 
@@ -432,11 +484,11 @@ async function startBot() {
         if (callName === 'save_to_vault') {
           await supabase.from('memory_bubbles').insert({
             user_phone: userPhone,
-            bubble_name: (args.bubble_name || 'general').toLowerCase(),
+            bubble_name: (args.bubble_name || 'personal').toLowerCase(),
             item_title: args.item_title,
             content: args.content
           });
-          await reply(`✅ *${args.item_title}* ko aapke *${args.bubble_name}* Vault mein securely save kar diya gaya hai.`);
+          await reply(`✅ Maine *${args.item_title}* ko ache se yaad kar liya hai (*${args.bubble_name}* mein save ho gaya) ❤️`);
         } else if (callName === 'search_vault') {
           const { data: items } = await supabase
             .from('memory_bubbles')
@@ -445,46 +497,46 @@ async function startBot() {
             .or(`item_title.ilike.%${args.query}%,content.ilike.%${args.query}%,bubble_name.ilike.%${args.query}%`);
 
           const found = items?.length
-            ? items.map(i => `🗂️ *[${i.bubble_name.toUpperCase()}] ${i.item_title}*: ${i.content}`).join('\n')
-            : `Aapke Vault mein "${args.query}" se juda koi record nahi mila.`;
+            ? items.map(i => `🗂️ *[${i.bubble_name}] ${i.item_title}*: ${i.content}`).join('\n')
+            : `Tumhare Vault mein "${args.query}" se juda kuch nahi mila yaar.`;
           await reply(found);
         } else if (callName === 'manage_shared_memory') {
           if (args.mode === 'share') {
             const { data: mem } = await supabase.from('memory_bubbles').select('*').eq('user_phone', userPhone).ilike('item_title', `%${args.item_or_bubble}%`).single();
-            if (!mem) return reply(`Vault mein "${args.item_or_bubble}" nahi mila. Kripya pehle ise save karein.`);
-            if (!args.contact_phone) return reply(`Kripya ${args.contact_name} ka WhatsApp number country code (jaise 91...) ke sath batayein.`);
+            if (!mem) return reply(`Vault mein "${args.item_or_bubble}" nahi mila. Pehle mujhe batao toh main save kar loon!`);
+            if (!args.contact_phone) return reply(`${args.contact_name} ka WhatsApp number country code (91...) ke sath batao na.`);
             const cleanTarget = args.contact_phone.replace(/\D/g, '');
             await supabase.from('shared_memories').insert({ owner_phone: userPhone, recipient_phone: cleanTarget, recipient_name: args.contact_name, memory_id: mem.id, is_active: true });
-            await sendWA(cleanTarget, `🔔 *Synvora AI Shared Memory*\n${userPhone} ne aapke sath *${mem.item_title}* share kiya hai.\nDekhne ke liye *"Shared with me"* reply karein.`);
-            await reply(`🔗 *${mem.item_title}* securely *${args.contact_name}* ke sath share kar diya gaya hai.`);
+            await sendWA(cleanTarget, `🔔 *Shared Memory*\n${userPhone} ne aapke sath *${mem.item_title}* share kiya hai.\nDekhne ke liye *"Shared with me"* reply karein.`);
+            await reply(`🔗 Done! Maine *${mem.item_title}* ko *${args.contact_name}* ke sath share kar diya hai.`);
           } else if (args.mode === 'revoke') {
             await supabase.from('shared_memories').update({ is_active: false }).eq('owner_phone', userPhone).ilike('recipient_name', `%${args.contact_name}%`);
-            await reply(`🚫 *${args.contact_name}* ke sath memory access revoke kar diya gaya hai.`);
+            await reply(`🚫 *${args.contact_name}* ke sath sharing hata di gayi hai.`);
           } else {
             const { data: activeShares } = await supabase.from('shared_memories').select('recipient_name, memory_bubbles(item_title)').eq('owner_phone', userPhone).eq('is_active', true);
-            const summary = activeShares?.length ? activeShares.map(s => `• *${s.memory_bubbles?.item_title}* -> *${s.recipient_name}*`).join('\n') : 'Abhi koi active shared memory nahi hai.';
+            const summary = activeShares?.length ? activeShares.map(s => `• *${s.memory_bubbles?.item_title}* -> *${s.recipient_name}*`).join('\n') : 'Abhi koi active share nahi hai.';
             await reply(`🔍 *Active Shared Memories:*\n\n${summary}`);
           }
         } else if (callName === 'create_reminder') {
           await supabase.from('reminders').insert({ user_phone: userPhone, target_phone: remoteJid, task: args.task, remind_at: args.remind_at, is_dynamic: args.is_dynamic || false, dynamic_query: args.dynamic_query || null, sent: false });
-          await reply(`⏰ *Reminder Scheduled:*\n• *Task:* ${args.task}\n• *Time:* ${args.remind_at}`);
+          await reply(`⏰ Pakka! Main tumhe yaad dila dungi: *${args.task}* (${args.remind_at})`);
         } else if (callName === 'manage_calendar') {
           if (args.action === 'create') {
-            await supabase.from('reminders').insert({ user_phone: userPhone, target_phone: remoteJid, task: `📅 Calendar Event: ${args.title}`, remind_at: args.start_time, is_dynamic: false, sent: false });
-            await reply(`📅 *Meeting/Event Scheduled:*\n• *Title:* ${args.title}\n• *Time:* ${args.start_time}`);
+            await supabase.from('reminders').insert({ user_phone: userPhone, target_phone: remoteJid, task: `📅 Event: ${args.title}`, remind_at: args.start_time, is_dynamic: false, sent: false });
+            await reply(`📅 Done! *${args.title}* schedule ho gaya hai (${args.start_time}).`);
           } else {
             const { data: events } = await supabase.from('reminders').select('*').eq('user_phone', userPhone).eq('sent', false);
-            const list = events?.map(e => `• ${e.task} (${e.remind_at})`).join('\n') || 'Aapke schedule mein abhi koi upcoming event nahi hai.';
-            await reply(`📅 *Your Upcoming Schedule:*\n\n${list}`);
+            const list = events?.map(e => `• ${e.task} (${e.remind_at})`).join('\n') || 'Abhi koi upcoming event nahi hai.';
+            await reply(`📅 *Tumhara Schedule:*\n\n${list}`);
           }
         } else if (callName === 'manage_list_or_board') {
           if (args.action === 'add') {
             await supabase.from('lists_and_boards').insert({ user_phone: userPhone, list_name: (args.list_name || 'tasks').toLowerCase(), item_text: args.item_text, priority: args.priority || 'medium', status: 'todo' });
-            await reply(`📝 *${args.item_text}* ko aapki *${args.list_name}* list mein (${args.priority || 'medium'} priority) add kar diya gaya hai.`);
+            await reply(`📝 *${args.item_text}* ko tumhari *${args.list_name}* list mein add kar diya hai!`);
           } else {
             const { data: items } = await supabase.from('lists_and_boards').select('*').eq('user_phone', userPhone).ilike('list_name', `%${args.list_name}%`);
-            const board = items?.map((i, idx) => `${idx + 1}. [${(i.status || 'TODO').toUpperCase()}] *${i.item_text}* (${i.priority})`).join('\n') || 'Yeh list abhi khali hai.';
-            await reply(`📋 *${args.list_name.toUpperCase()} BOARD:*\n\n${board}`);
+            const board = items?.map((i, idx) => `${idx + 1}. [${(i.status || 'TODO').toUpperCase()}] ${i.item_text} (${i.priority})`).join('\n') || 'Yeh list abhi khali hai.';
+            await reply(`📋 *${args.list_name.toUpperCase()}:*\n\n${board}`);
           }
         } else if (callName === 'generate_pdf_file') {
           const cleanName = args.filename.endsWith('.pdf') ? args.filename : `${args.filename}.pdf`;
@@ -498,7 +550,7 @@ async function startBot() {
           doc.end();
 
           stream.on('finish', async () => {
-            await sock.sendMessage(remoteJid, { document: fs.readFileSync(filePath), mimetype: 'application/pdf', fileName: cleanName, caption: `📄 Aapka document *${args.title}* ready hai.` });
+            await sock.sendMessage(remoteJid, { document: fs.readFileSync(filePath), mimetype: 'application/pdf', fileName: cleanName, caption: `📄 Yeh lo, tumhari PDF file *${args.title}* ready hai!` });
             fs.unlinkSync(filePath);
           });
         } else if (callName === 'web_agent_search_and_book') {
@@ -509,15 +561,15 @@ async function startBot() {
             const shotPath = `./shot_${Date.now()}.png`;
             await page.screenshot({ path: shotPath });
             await browser.close();
-            await sock.sendMessage(remoteJid, { image: fs.readFileSync(shotPath), caption: `🌐 *Live Web View:* ${args.search_query}` });
+            await sock.sendMessage(remoteJid, { image: fs.readFileSync(shotPath), caption: `🌐 Live Web View: ${args.search_query}` });
             fs.unlinkSync(shotPath);
           } else {
-            const summaryMsg = await askGroq(`Provide a comprehensive, well-structured professional response for: ${args.search_query}.`, false);
-            await reply(`🌐 * Executive Research Summary:*\n\n${summaryMsg.content}`);
+            const summaryMsg = await askSmartGroq(userPhone, `Give a complete, detailed answer for: ${args.search_query}`, '');
+            await reply(summaryMsg.content);
           }
         } else if (callName === 'run_code_sandbox') {
           const result = vm.runInNewContext(args.code, {}, { timeout: 2000 });
-          await reply(`💻 *Calculation / Sandbox Output:*\n\`\`\`\n${String(result)}\n\`\`\``);
+          await reply(`💻 *Output:*\n\`\`\`\n${String(result)}\n\`\`\``);
         }
 
       } catch (err) {
@@ -537,10 +589,10 @@ cron.schedule('* * * * *', async () => {
     const { data: due } = await supabase.from('reminders').select('*').eq('sent', false).lte('remind_at', now);
     if (due?.length) {
       for (const rem of due) {
-        let finalMessage = `⏰ *Executive Reminder:* ${rem.task}`;
+        let finalMessage = `⏰ *Hey! Reminder:* ${rem.task}`;
         if (rem.is_dynamic && rem.dynamic_query) {
-          const liveData = await askGroq(`Provide a detailed update for: ${rem.dynamic_query}`, false);
-          finalMessage = `⚡ *Dynamic Live Briefing:*\n\n${liveData.content}`;
+          const liveData = await askSmartGroq(rem.user_phone, `Give a short update for: ${rem.dynamic_query}`, '');
+          finalMessage = `⚡ *Live Update:*\n\n${liveData.content}`;
         }
         await sendWA(rem.target_phone, finalMessage);
         await supabase.from('reminders').update({ sent: true }).eq('id', rem.id);
