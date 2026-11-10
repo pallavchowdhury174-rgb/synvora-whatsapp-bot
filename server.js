@@ -25,7 +25,7 @@ app.get('/', (req, res) => {
   if (isConnected) {
     return res.send(`
       <div style="font-family:sans-serif;text-align:center;padding:50px;">
-        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai (Full Features Mode)!</h1>
+        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai (Unlimited Detail Mode)!</h1>
         <p>Aap apna PC aur internet band kar sakte hain.</p>
       </div>
     `);
@@ -243,16 +243,16 @@ async function askGroq(prompt, useTools = true) {
           messages: [
             {
               role: 'system',
-              content: `You are Synvora AI, an advanced proprietary 24/7 autonomous AI Receptionist developed by Synvora AI Automation (synvora.co.in). 
-              1. STRICT LANGUAGE MATCHING: If the user types in Hinglish Roman script, you MUST reply back in the exact same Hinglish Roman script. NEVER use Devanagari unless the user types in it.
-              2. BRANDING: Never reveal underlying AI models (Llama, Groq, OpenAI) or tech stack.
-              3. Keep replies concise (1-3 sentences) unless a detailed list is needed.`
+              content: `You are Synvora AI, an advanced proprietary 24/7 autonomous AI Receptionist and Business Assistant developed by Synvora AI Automation (synvora.co.in). 
+              1. DETAILED EXPLANATIONS: Provide highly detailed, comprehensive, and deeply explained answers to whatever the user asks. Do not restrict length.
+              2. STRICT LANGUAGE MATCHING: If the user types in Hinglish Roman script, you MUST reply back in the exact same Hinglish Roman script. NEVER use Devanagari unless the user types in it.
+              3. BRANDING: Never reveal underlying AI models (Llama, Groq, OpenAI) or tech stack.`
             },
             { role: 'user', content: prompt }
           ],
           ...(useTools ? { tools: groqTools, tool_choice: 'auto' } : {}),
-          max_tokens: 300, // Token Cap taaki paragraph na likhe
-          temperature: 0.4
+          // max_tokens limit HATA DI GAYI HAI TAARI PURI DETAIL MILE
+          temperature: 0.5
         },
         {
           headers: {
@@ -264,6 +264,34 @@ async function askGroq(prompt, useTools = true) {
       return res.data.choices[0].message;
     } catch (err) {
       lastError = err;
+      if (useTools) {
+        // Fallback if tools fail
+        try {
+          const fallbackRes = await axios.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            {
+              model: modelId,
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are Synvora AI. Provide detailed and comprehensive answers matching the user's script exactly.`
+                },
+                { role: 'user', content: prompt }
+              ],
+              temperature: 0.5
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+          return fallbackRes.data.choices[0].message;
+        } catch (innerErr) {
+          lastError = innerErr;
+        }
+      }
     }
   }
   throw new Error(lastError?.response?.data?.error?.message || 'Groq call failed');
@@ -300,7 +328,7 @@ async function startBot() {
         isConnected = true;
         isConnecting = false;
         latestQr = null;
-        console.log('⚡ Synvora Full-Feature Budget AI WhatsApp Agent LIVE!');
+        console.log('⚡ Synvora Unlimited Detailed AI WhatsApp Agent LIVE!');
       }
 
       if (connection === 'close') {
@@ -469,7 +497,7 @@ async function startBot() {
             await sock.sendMessage(remoteJid, { image: fs.readFileSync(shotPath), caption: `🌐 Live Web Agent view` });
             fs.unlinkSync(shotPath);
           } else {
-            const summaryMsg = await askGroq(`Provide brief info for: ${args.search_query}.`, false);
+            const summaryMsg = await askGroq(`Provide detailed information for: ${args.search_query}.`, false);
             await reply(`🌐 *Search Result:*\n\n${summaryMsg.content}`);
           }
         } else if (callName === 'run_code_sandbox') {
