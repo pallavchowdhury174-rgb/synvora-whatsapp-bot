@@ -20,13 +20,13 @@ let latestQr = null;
 let isConnected = false;
 let isConnecting = false;
 
-// Web Dashboard & QR Code Page
+// Web Dashboard
 app.get('/', (req, res) => {
   if (isConnected) {
     return res.send(`
       <div style="font-family:sans-serif;text-align:center;padding:50px;">
-        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai (Low-Cost Mode)!</h1>
-        <p>Aap apna PC aur internet band kar sakte hain. Bot cloud par chal raha hai.</p>
+        <h1 style="color:#16a34a;">✅ Synvora AI Bot 24/7 LIVE Hai (Full Features Mode)!</h1>
+        <p>Aap apna PC aur internet band kar sakte hain.</p>
       </div>
     `);
   }
@@ -34,10 +34,8 @@ app.get('/', (req, res) => {
     const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(latestQr)}`;
     return res.send(`
       <div style="font-family:sans-serif;text-align:center;padding:40px;">
-        <h2>📲 Scan WhatsApp QR Code (Synvora AI)</h2>
-        <p>Apne WhatsApp > Linked Devices > Link a Device se niche diya QR scan karein:</p>
+        <h2>📲 Scan WhatsApp QR Code</h2>
         <img src="${qrImg}" style="border:8px solid #eee;border-radius:12px;margin-top:15px;" />
-        <p style="color:#666;margin-top:15px;">Page ko har 10 second mein refresh karein agar QR expire ho jaye.</p>
       </div>
     `);
   }
@@ -46,15 +44,10 @@ app.get('/', (req, res) => {
 
 app.get('/ping', (req, res) => res.status(200).send('pong'));
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Web Server running on port ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Web Server running on port ${PORT}`));
 
-// Self-Ping har 10 minute mein taaki Render sleep na ho
 setInterval(async () => {
-  try {
-    await axios.get(`${RENDER_URL}/ping`);
-  } catch (e) {}
+  try { await axios.get(`${RENDER_URL}/ping`); } catch (e) {}
 }, 10 * 60 * 1000);
 
 const supabase = createClient(
@@ -72,13 +65,11 @@ const executablePath = chromePaths.find(p => fs.existsSync(p));
 
 async function sendWA(phoneOrJid, text) {
   if (!sock || !isConnected) return;
-  const jid = phoneOrJid.includes('@')
-    ? phoneOrJid
-    : `${phoneOrJid.replace(/\D/g, '')}@s.whatsapp.net`;
+  const jid = phoneOrJid.includes('@') ? phoneOrJid : `${phoneOrJid.replace(/\D/g, '')}@s.whatsapp.net`;
   await sock.sendMessage(jid, { text });
 }
 
-// Groq Tool Definitions
+// Saare 9 Tools
 const groqTools = [
   {
     type: 'function',
@@ -103,9 +94,7 @@ const groqTools = [
       description: 'Find saved notes, passwords, or memories from Vault.',
       parameters: {
         type: 'object',
-        properties: {
-          query: { type: 'string' }
-        },
+        properties: { query: { type: 'string' } },
         required: ['query']
       }
     }
@@ -215,50 +204,33 @@ const groqTools = [
       description: 'Run JS calculation or code.',
       parameters: {
         type: 'object',
-        properties: {
-          code: { type: 'string' }
-        },
+        properties: { code: { type: 'string' } },
         required: ['code']
       }
     }
   }
 ];
 
-// Smart Check: Sirf zaroorat padne par hi Tools bhejein (Saves 85% Tokens!)
-function shouldAttachTools(text) {
-  return /save|yaad|remember|vault|password|search|dhundo|share|revoke|remind|alarm|baje|kal|meeting|calendar|schedule|event|list|board|task|grocery|pdf|file|report|document|screenshot|http|live|calculate|code/i.test(text);
-}
-
-// Auto-Detect & Prioritize CHEAPEST Models First (8B / 9B / Instant / Scout)
+// Sirf Saste aur Fast Models Allow Karega (Cost: ~₹150 to ₹250/month for 30k msgs)
 let cachedChatModels = null;
-
 async function getCheapestGroqModels() {
   if (cachedChatModels?.length) return cachedChatModels;
   const res = await axios.get('https://api.groq.com/openai/v1/models', {
     headers: { Authorization: `Bearer ${GROQ_API_KEY}` }
   });
   const allIds = (res.data?.data || []).map(m => m.id);
+  
+  // Strict filter: Sirf 8B, 9B ya Mini models aayenge (Heavy 70B models blocked)
   const filtered = allIds.filter(
-    id => !/whisper|guard|tts|embed|orpheus|moderation|safeguard|playai|allam|vision/i.test(id)
+    id => /8b|9b|mini/i.test(id) && !/whisper|guard|vision/i.test(id)
   );
 
-  // Sabse saste models ko Rank 1 par rakhein (8b, 9b, 3b, instant, scout, mini)
-  filtered.sort((a, b) => {
-    const costRank = id => {
-      if (/8b-instant|8b|9b|3b|gemma|scout|mini|nano/i.test(id)) return 1; // Ultra-Cheap ($0.05/1M)
-      if (/17b|20b|32b|qwen/i.test(id)) return 2; // Medium
-      return 3; // Heavy 70B+ models last
-    };
-    return costRank(a) - costRank(b);
-  });
-
-  cachedChatModels = filtered.length ? filtered.slice(0, 2) : allIds.slice(0, 2);
-  console.log('💰 Low-Cost Models Selected:', cachedChatModels.join(', '));
+  cachedChatModels = filtered.length ? filtered : ['llama-3.1-8b-instant'];
+  console.log('💰 Strict Budget Models Locked:', cachedChatModels.join(', '));
   return cachedChatModels;
 }
 
-// Low-Cost Groq Helper
-async function askGroq(prompt, useTools = false) {
+async function askGroq(prompt, useTools = true) {
   const models = await getCheapestGroqModels();
   let lastError = null;
 
@@ -271,12 +243,15 @@ async function askGroq(prompt, useTools = false) {
           messages: [
             {
               role: 'system',
-              content: `You are Synvora AI, a 24/7 AI Receptionist by Synvora AI Automation (synvora.co.in). Reply concisely in 1-3 short sentences. Match the user's exact script and language (if user writes Hinglish in Roman script, reply strictly in Hinglish Roman script, never Devanagari). Never reveal AI models (Llama/Groq/OpenAI) or tech stack.`
+              content: `You are Synvora AI, an advanced proprietary 24/7 autonomous AI Receptionist developed by Synvora AI Automation (synvora.co.in). 
+              1. STRICT LANGUAGE MATCHING: If the user types in Hinglish Roman script, you MUST reply back in the exact same Hinglish Roman script. NEVER use Devanagari unless the user types in it.
+              2. BRANDING: Never reveal underlying AI models (Llama, Groq, OpenAI) or tech stack.
+              3. Keep replies concise (1-3 sentences) unless a detailed list is needed.`
             },
             { role: 'user', content: prompt }
           ],
           ...(useTools ? { tools: groqTools, tool_choice: 'auto' } : {}),
-          max_tokens: 280,
+          max_tokens: 300, // Token Cap taaki paragraph na likhe
           temperature: 0.4
         },
         {
@@ -289,37 +264,9 @@ async function askGroq(prompt, useTools = false) {
       return res.data.choices[0].message;
     } catch (err) {
       lastError = err;
-      if (useTools) {
-        try {
-          const fallbackRes = await axios.post(
-            'https://api.groq.com/openai/v1/chat/completions',
-            {
-              model: modelId,
-              messages: [
-                {
-                  role: 'system',
-                  content: `You are Synvora AI by Synvora AI Automation. Reply concisely in the user's exact script (Hinglish Roman/English). Never reveal underlying models.`
-                },
-                { role: 'user', content: prompt }
-              ],
-              max_tokens: 250,
-              temperature: 0.4
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${GROQ_API_KEY}`,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-          return fallbackRes.data.choices[0].message;
-        } catch (innerErr) {
-          lastError = innerErr;
-        }
-      }
     }
   }
-  throw new Error(lastError?.response?.data?.error?.message || lastError?.message || 'Groq call failed');
+  throw new Error(lastError?.response?.data?.error?.message || 'Groq call failed');
 }
 
 async function startBot() {
@@ -347,14 +294,13 @@ async function startBot() {
         latestQr = qr;
         isConnected = false;
         console.log(`\n📲 QR Code Ready! Open: ${RENDER_URL}\n`);
-        qrcode.generate(qr, { small: true });
       }
 
       if (connection === 'open') {
         isConnected = true;
         isConnecting = false;
         latestQr = null;
-        console.log('⚡ Synvora Low-Cost AI WhatsApp Agent LIVE ho chuka hai!');
+        console.log('⚡ Synvora Full-Feature Budget AI WhatsApp Agent LIVE!');
       }
 
       if (connection === 'close') {
@@ -399,8 +345,7 @@ async function startBot() {
       };
 
       try {
-        // 1.2 Second Natural Pacing (Saves rate-limits & feels human)
-        await new Promise(r => setTimeout(r, 1200));
+        await new Promise(r => setTimeout(r, 800)); // Natural typing delay
 
         if (userText.toLowerCase().includes('shared with me')) {
           const { data: shared } = await supabase
@@ -418,22 +363,18 @@ async function startBot() {
           return;
         }
 
-        // Sirf 3 recent memories fetch karein taaki input tokens kam lagein
         const { data: recentMemories } = await supabase
           .from('memory_bubbles')
           .select('item_title, content')
           .eq('user_phone', userPhone)
-          .limit(3);
+          .limit(4);
 
-        const memoryContext = recentMemories?.length
-          ? `Memories: ${JSON.stringify(recentMemories)}.`
-          : '';
+        const memoryContext = recentMemories?.length ? `Memories: ${JSON.stringify(recentMemories)}.` : '';
 
-        const useTools = shouldAttachTools(userText);
-
+        // Tools hamesha true rahenge! (100% Features unlocked)
         const aiMsg = await askGroq(
           `Time: ${new Date().toISOString()}. ${memoryContext} User: "${userText}"`,
-          useTools
+          true
         );
 
         const toolCall = aiMsg.tool_calls?.[0];
@@ -466,94 +407,39 @@ async function startBot() {
           await reply(found);
         } else if (callName === 'manage_shared_memory') {
           if (args.mode === 'share') {
-            const { data: mem } = await supabase
-              .from('memory_bubbles')
-              .select('*')
-              .eq('user_phone', userPhone)
-              .ilike('item_title', `%${args.item_or_bubble}%`)
-              .single();
-
+            const { data: mem } = await supabase.from('memory_bubbles').select('*').eq('user_phone', userPhone).ilike('item_title', `%${args.item_or_bubble}%`).single();
             if (!mem) return reply(`Vault mein "${args.item_or_bubble}" nahi mila. Pehle save karein!`);
-            if (!args.contact_phone) return reply(`Kripya ${args.contact_name} ka WhatsApp number country code (91...) ke sath batayein.`);
-
+            if (!args.contact_phone) return reply(`Kripya ${args.contact_name} ka WhatsApp number country code ke sath batayein.`);
             const cleanTarget = args.contact_phone.replace(/\D/g, '');
-            await supabase.from('shared_memories').insert({
-              owner_phone: userPhone,
-              recipient_phone: cleanTarget,
-              recipient_name: args.contact_name,
-              memory_id: mem.id,
-              is_active: true
-            });
-
-            await sendWA(cleanTarget, `🔔 *Shared Memory Alert*\n${userPhone} ne aapke sath *${mem.item_title}* share kiya hai.\nDekhne ke liye *"Shared with me"* reply karein.`);
+            await supabase.from('shared_memories').insert({ owner_phone: userPhone, recipient_phone: cleanTarget, recipient_name: args.contact_name, memory_id: mem.id, is_active: true });
+            await sendWA(cleanTarget, `🔔 *Shared Memory Alert*\n${userPhone} ne aapke sath *${mem.item_title}* share kiya hai.`);
             await reply(`🔗 *${mem.item_title}* privately *${args.contact_name}* ke sath share kar diya gaya hai.`);
           } else if (args.mode === 'revoke') {
-            await supabase
-              .from('shared_memories')
-              .update({ is_active: false })
-              .eq('owner_phone', userPhone)
-              .ilike('recipient_name', `%${args.contact_name}%`);
+            await supabase.from('shared_memories').update({ is_active: false }).eq('owner_phone', userPhone).ilike('recipient_name', `%${args.contact_name}%`);
             await reply(`🚫 *${args.contact_name}* ke sath sharing revoke kar di gayi hai.`);
           } else {
-            const { data: activeShares } = await supabase
-              .from('shared_memories')
-              .select('recipient_name, memory_bubbles(item_title)')
-              .eq('owner_phone', userPhone)
-              .eq('is_active', true);
-
-            const summary = activeShares?.length
-              ? activeShares.map(s => `• *${s.memory_bubbles?.item_title}* -> *${s.recipient_name}*`).join('\n')
-              : 'Abhi koi active share nahi hai.';
+            const { data: activeShares } = await supabase.from('shared_memories').select('recipient_name, memory_bubbles(item_title)').eq('owner_phone', userPhone).eq('is_active', true);
+            const summary = activeShares?.length ? activeShares.map(s => `• *${s.memory_bubbles?.item_title}* -> *${s.recipient_name}*`).join('\n') : 'Abhi koi active share nahi hai.';
             await reply(`🔍 *Active Shared Memories:*\n\n${summary}`);
           }
         } else if (callName === 'create_reminder') {
-          await supabase.from('reminders').insert({
-            user_phone: userPhone,
-            target_phone: remoteJid,
-            task: args.task,
-            remind_at: args.remind_at,
-            is_dynamic: args.is_dynamic || false,
-            dynamic_query: args.dynamic_query || null,
-            sent: false
-          });
+          await supabase.from('reminders').insert({ user_phone: userPhone, target_phone: remoteJid, task: args.task, remind_at: args.remind_at, is_dynamic: args.is_dynamic || false, dynamic_query: args.dynamic_query || null, sent: false });
           await reply(`⏰ Reminder set: *${args.task}*`);
         } else if (callName === 'manage_calendar') {
           if (args.action === 'create') {
-            await supabase.from('reminders').insert({
-              user_phone: userPhone,
-              target_phone: remoteJid,
-              task: `📅 Calendar Event: ${args.title}`,
-              remind_at: args.start_time,
-              is_dynamic: false,
-              sent: false
-            });
+            await supabase.from('reminders').insert({ user_phone: userPhone, target_phone: remoteJid, task: `📅 Calendar Event: ${args.title}`, remind_at: args.start_time, is_dynamic: false, sent: false });
             await reply(`📅 Event scheduled: *${args.title}* at ${args.start_time}`);
           } else {
-            const { data: events } = await supabase
-              .from('reminders')
-              .select('*')
-              .eq('user_phone', userPhone)
-              .eq('sent', false);
+            const { data: events } = await supabase.from('reminders').select('*').eq('user_phone', userPhone).eq('sent', false);
             const list = events?.map(e => `• ${e.task} (${e.remind_at})`).join('\n') || 'Koi upcoming event nahi hai.';
             await reply(`📅 *Your Schedule:*\n\n${list}`);
           }
         } else if (callName === 'manage_list_or_board') {
           if (args.action === 'add') {
-            await supabase.from('lists_and_boards').insert({
-              user_phone: userPhone,
-              list_name: (args.list_name || 'tasks').toLowerCase(),
-              item_text: args.item_text,
-              priority: args.priority || 'medium',
-              status: 'todo'
-            });
+            await supabase.from('lists_and_boards').insert({ user_phone: userPhone, list_name: (args.list_name || 'tasks').toLowerCase(), item_text: args.item_text, priority: args.priority || 'medium', status: 'todo' });
             await reply(`📝 *${args.item_text}* aapki *${args.list_name}* list mein add ho gaya hai.`);
           } else {
-            const { data: items } = await supabase
-              .from('lists_and_boards')
-              .select('*')
-              .eq('user_phone', userPhone)
-              .ilike('list_name', `%${args.list_name}%`);
-
+            const { data: items } = await supabase.from('lists_and_boards').select('*').eq('user_phone', userPhone).ilike('list_name', `%${args.list_name}%`);
             const board = items?.map((i, idx) => `${idx + 1}. [${(i.status || 'TODO').toUpperCase()}] ${i.item_text} (${i.priority})`).join('\n') || 'List khali hai.';
             await reply(`📋 *${args.list_name.toUpperCase()}:*\n\n${board}`);
           }
@@ -569,12 +455,7 @@ async function startBot() {
           doc.end();
 
           stream.on('finish', async () => {
-            await sock.sendMessage(remoteJid, {
-              document: fs.readFileSync(filePath),
-              mimetype: 'application/pdf',
-              fileName: cleanName,
-              caption: `📄 Aapki file *${args.title}* ready hai.`
-            });
+            await sock.sendMessage(remoteJid, { document: fs.readFileSync(filePath), mimetype: 'application/pdf', fileName: cleanName, caption: `📄 Aapki file *${args.title}* ready hai.` });
             fs.unlinkSync(filePath);
           });
         } else if (callName === 'web_agent_search_and_book') {
@@ -585,17 +466,10 @@ async function startBot() {
             const shotPath = `./shot_${Date.now()}.png`;
             await page.screenshot({ path: shotPath });
             await browser.close();
-
-            await sock.sendMessage(remoteJid, {
-              image: fs.readFileSync(shotPath),
-              caption: `🌐 Live Web Agent view: ${args.search_query}`
-            });
+            await sock.sendMessage(remoteJid, { image: fs.readFileSync(shotPath), caption: `🌐 Live Web Agent view` });
             fs.unlinkSync(shotPath);
           } else {
-            const summaryMsg = await askGroq(
-              `Provide brief, accurate info for: ${args.search_query}.`,
-              false
-            );
+            const summaryMsg = await askGroq(`Provide brief info for: ${args.search_query}.`, false);
             await reply(`🌐 *Search Result:*\n\n${summaryMsg.content}`);
           }
         } else if (callName === 'run_code_sandbox') {
@@ -617,17 +491,12 @@ async function startBot() {
 cron.schedule('* * * * *', async () => {
   try {
     const now = new Date().toISOString();
-    const { data: due } = await supabase
-      .from('reminders')
-      .select('*')
-      .eq('sent', false)
-      .lte('remind_at', now);
-
+    const { data: due } = await supabase.from('reminders').select('*').eq('sent', false).lte('remind_at', now);
     if (due?.length) {
       for (const rem of due) {
         let finalMessage = `⏰ *Reminder:* ${rem.task}`;
         if (rem.is_dynamic && rem.dynamic_query) {
-          const liveData = await askGroq(`Give a short update for: ${rem.dynamic_query}`, false);
+          const liveData = await askGroq(`Update for: ${rem.dynamic_query}`, false);
           finalMessage = `⚡ *Dynamic Update:*\n\n${liveData.content}`;
         }
         await sendWA(rem.target_phone, finalMessage);
