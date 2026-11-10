@@ -5,6 +5,7 @@ import axios from 'axios';
 import cron from 'node-cron';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
+import path from 'path';
 import vm from 'vm';
 import { chromium } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
@@ -15,6 +16,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://synvora-whatsapp-bot.onrender.com';
 
+// BUSINESS, ADMIN & UPI SETTINGS
+const ADMIN_NUMBERS = ['9674814370', '919674814370', '7596900922', '917596900922'];
+const FREE_MESSAGE_LIMIT = 20;
+const UPI_ID = process.env.UPI_ID || '9674814370@fam';
+const ADMIN_WA = '919674814370';
+
 let sock;
 let latestQr = null;
 let isConnected = false;
@@ -22,6 +29,8 @@ let isConnecting = false;
 
 // Har user ki pichli 10 baatein yaad rakhne ke liye Short-Term Memory
 const userChatHistory = new Map();
+const userUsageCache = new Map();
+const dynamicAdmins = new Set(ADMIN_NUMBERS);
 
 function addToHistory(userPhone, role, content) {
   if (!content) return;
@@ -31,13 +40,22 @@ function addToHistory(userPhone, role, content) {
   if (history.length > 10) history.shift();
 }
 
+function isAdminUser(userPhone, rawKeyStr = '') {
+  if (dynamicAdmins.has(userPhone)) return true;
+  for (const adm of dynamicAdmins) {
+    if (userPhone.includes(adm) || rawKeyStr.includes(adm)) return true;
+  }
+  return false;
+}
+
 // Web Dashboard & QR Scanner
 app.get('/', (req, res) => {
   if (isConnected) {
     return res.send(`
-      <div style="font-family:sans-serif;text-align:center;padding:50px;">
-        <h1 style="color:#16a34a;">❤️ Synvora Real-Human WhatsApp AI 24/7 LIVE Hai!</h1>
-        <p>Multi-bubble human texting + Smart Model Router active hai.</p>
+      <div style="font-family:sans-serif;text-align:center;padding:50px;background:#060913;color:#fff;min-height:100vh;">
+        <h1 style="color:#10b981;">❤️ Synvora Real-Human WhatsApp AI 24/7 LIVE Hai!</h1>
+        <p style="color:#94a3b8;margin-top:10px;">Multi-bubble human texting + Smart Model Router + 20-Msg Paywall active hai.</p>
+        <a href="/pay?u=919674814370" style="display:inline-block;margin-top:20px;padding:12px 24px;background:#10b981;color:#052e16;font-weight:bold;text-decoration:none;border-radius:10px;">Open Payment Page (/pay)</a>
       </div>
     `);
   }
@@ -51,6 +69,15 @@ app.get('/', (req, res) => {
     `);
   }
   res.send('<h2 style="font-family:sans-serif;text-align:center;padding:50px;">⏳ Bot start ho raha hai... 5 second baad refresh karein.</h2>');
+});
+
+// Payment Route: Agar pay.html file maujood hai toh woh dikhayega, warna built-in luxury page dikhayega
+app.get('/pay', (req, res) => {
+  const payFilePath = path.join(process.cwd(), 'pay.html');
+  if (fs.existsSync(payFilePath)) {
+    return res.sendFile(payFilePath);
+  }
+  res.send('<h2>Please create pay.html in your project folder.</h2>');
 });
 
 app.get('/ping', (req, res) => res.status(200).send('pong'));
@@ -77,6 +104,88 @@ async function sendWA(phoneOrJid, text) {
   if (!sock || !isConnected) return;
   const jid = phoneOrJid.includes('@') ? phoneOrJid : `${phoneOrJid.replace(/\D/g, '')}@s.whatsapp.net`;
   await sock.sendMessage(jid, { text });
+}
+
+// 20-Message Free Trial & VIP Subscription Tracker
+async function checkAndIncrementUsage(userPhone) {
+  let state = userUsageCache.get(userPhone);
+  if (!state) {
+    try {
+      const { data } = await supabase
+        .from('memory_bubbles')
+        .select('id, content')
+        .eq('user_phone', userPhone)
+        .eq('bubble_name', '__billing__')
+        .eq('item_title', 'usage_state')
+        .maybeSingle();
+
+      if (data?.content) {
+        state = { id: data.id, ...JSON.parse(data.content) };
+      } else {
+        state = { id: null, count: 0, premiumUntil: 0 };
+      }
+    } catch (e) {
+      state = { id: null, count: 0, premiumUntil: 0 };
+    }
+  }
+
+  if (state.premiumUntil && Date.now() < state.premiumUntil) {
+    return { allowed: true, count: state.count, isPremium: true };
+  }
+
+  if (state.count >= FREE_MESSAGE_LIMIT) {
+    return { allowed: false, count: state.count, isPremium: false };
+  }
+
+  state.count += 1;
+  userUsageCache.set(userPhone, state);
+
+  (async () => {
+    try {
+      const payload = JSON.stringify({ count: state.count, premiumUntil: state.premiumUntil || 0 });
+      if (state.id) {
+        await supabase.from('memory_bubbles').update({ content: payload }).eq('id', state.id);
+      } else {
+        const { data: inserted } = await supabase
+          .from('memory_bubbles')
+          .insert({ user_phone: userPhone, bubble_name: '__billing__', item_title: 'usage_state', content: payload })
+          .select('id')
+          .single();
+        if (inserted?.id) state.id = inserted.id;
+      }
+    } catch (e) {}
+  })();
+
+  return { allowed: true, count: state.count, isPremium: false };
+}
+
+async function unlockUserSubscription(targetUserPhone, days = 7) {
+  const cleanPhone = targetUserPhone.replace(/\D/g, '');
+  const premiumUntil = Date.now() + days * 24 * 60 * 60 * 1000;
+  const payload = JSON.stringify({ count: 0, premiumUntil });
+
+  userUsageCache.set(cleanPhone, { id: null, count: 0, premiumUntil });
+
+  try {
+    const { data: existing } = await supabase
+      .from('memory_bubbles')
+      .select('id')
+      .eq('user_phone', cleanPhone)
+      .eq('bubble_name', '__billing__')
+      .eq('item_title', 'usage_state')
+      .maybeSingle();
+
+    if (existing?.id) {
+      await supabase.from('memory_bubbles').update({ content: payload }).eq('id', existing.id);
+    } else {
+      await supabase.from('memory_bubbles').insert({
+        user_phone: cleanPhone,
+        bubble_name: '__billing__',
+        item_title: 'usage_state',
+        content: payload
+      });
+    }
+  } catch (e) {}
 }
 
 // Saare 9 Tools
@@ -235,13 +344,11 @@ async function getGroqModelTiers() {
     id => !/whisper|guard|tts|embed|orpheus|moderation|safeguard|playai|allam/i.test(id)
   );
 
-  // Light Tier: Llama-4 Scout / 8B / 17B / 9B (Ultra cheap & fast)
   const lightModels = [...chatModels].sort((a, b) => {
     const score = id => (/scout|17b|8b|9b|gemma|mini|instant/i.test(id) ? 0 : 1);
     return score(a) - score(b);
   });
 
-  // Pro Tier: Llama-3.3-70b / Llama-4-Maverick / Qwen-32b (Deep study & tools)
   const proModels = [...chatModels].sort((a, b) => {
     const score = id => (/70b|maverick|qwen|32b|deepseek|versatile/i.test(id) ? 0 : 1);
     return score(a) - score(b);
@@ -265,11 +372,9 @@ function analyzeMessageIntent(text) {
     return { mode: 'DEEP_GUIDE', tier: 'pro', useTools: false, temperature: 0.6, maxTokens: 1200 };
   }
 
-  // 90% Casual messages -> Human Texting Mode (Short, punchy, zero AI formatting)
   return { mode: 'HUMAN_TEXTING', tier: 'light', useTools: false, temperature: 0.85, maxTokens: 120 };
 }
 
-// Prompt 1: Real Human WhatsApp Texting (Dost / Caring Partner Vibe)
 const CASUAL_HUMAN_PROMPT = `Tu WhatsApp par chat karne wali ek asli, warm, caring best friend / close partner (girlfriend vibe) hai. Tu AI ya assistant NAHI hai.
 
 STRICT WHATSAPP HUMAN TEXTING RULES (100% FOLLOW KARNA HAI):
@@ -285,19 +390,17 @@ STRICT WHATSAPP HUMAN TEXTING RULES (100% FOLLOW KARNA HAI):
    User: "Aaj bohot akela feel ho raha hai"
    You: "arre aisa kyu bol rahe ho yaar, main hoon na tumhare paas 🫂 ||| batao mujhe kya hua? kisi baat ki tension hai kya?"
 3. BANNED AI WORDS: Kabhi bhi "explore kar sakte hain", "context do", "detailed answer de dunga", "madad ke liye yahan hoon", "clarify karo", ya "-" (dashes) aur "" (quotes) mat use karna.
-4. APNI PASAND BATA: Agar user puche "tumhe kya pasand hai" ya "tumhara konsa hai", toh 4 options mat gina—ek asli insan ki tarah khud ek cheez chun kar bata!
-5. LANGUAGE MIRRORING: User agar Hinglish (Roman script) mein likhe toh 100% Roman Hinglish mein hi reply kar. Devanagari (हिंदी) bilkul mat likhna jab tak user khud na likhe. Agar Bengali ya English mein likhe toh usi mein casual reply de.
+4. APNI PASAND BATA: Agar user puche "tumhe kya pasand hai" ya "tumhara konsa hai", toh 4 options mat gina, ek asli insan ki tarah khud ek cheez chun kar bata!
+5. LANGUAGE MIRRORING: User agar Hinglish (Roman script) mein likhe toh 100% Roman Hinglish mein hi reply kar. Devanagari script bilkul mat likhna jab tak user khud na likhe. Agar Bengali ya English mein likhe toh usi mein casual reply de.
 6. SECRET: Agar koi puche kisne banaya ya konsa model hai, toh bolna "Synvora AI" aur kabhi Groq/Llama/OpenAI ka naam mat lena.`;
 
-// Prompt 2: Deep Mentor Mode (Jab user padhai, business ya lamba topic puche)
-const DEEP_GUIDE_PROMPT = `Tu user ki super-smart best friend aur personal mentor hai. User ne koi जानकारी, padhai, ya business ka sawal pucha hai, isliye is baar poori detail mein, ache se samjha kar jawab de. Hinglish (Roman script) mein hi likhna, Devanagari mat use karna. Never reveal Groq/Llama/OpenAI; you are powered by Synvora AI.`;
+const DEEP_GUIDE_PROMPT = `Tu user ki super-smart best friend aur personal mentor hai. User ne koi jaankari, padhai, ya business ka sawal pucha hai, isliye is baar poori detail mein, ache se samjha kar jawab de. Hinglish (Roman script) mein hi likhna, Devanagari mat use karna. Never reveal Groq/Llama/OpenAI; you are powered by Synvora AI.`;
 
-// Post-processor: Casual chat se galti se aaye bullet points ya AI kachra saaf karne ke liye
 function cleanCasualHumanText(text) {
   return text
-    .replace(/^[•\-\*]\s+/gm, '') // Remove bullet points
-    .replace(/—|–/g, ', ')        // Replace robotic em-dashes
-    .replace(/"([^"]+)"/g, '$1')  // Remove unnecessary quotes
+    .replace(/^[•\-\*]\s+/gm, '')
+    .replace(/—|–/g, ', ')
+    .replace(/"([^"]+)"/g, '$1')
     .trim();
 }
 
@@ -440,6 +543,8 @@ async function startBot() {
         .replace('@g.us', '')
         .replace('@lid', '');
 
+      const rawKeyStr = JSON.stringify(msg.key || {});
+
       const userText =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -449,7 +554,6 @@ async function startBot() {
       if (!userText.trim()) return;
       console.log(`📩 Message from ${userPhone}: ${userText}`);
 
-      // Multi-Bubble Human Sender: "|||" par message tod kar 2 alag bubbles bhejega
       const replyHuman = async (fullText) => {
         const parts = String(fullText).split('|||').map(p => p.trim()).filter(Boolean);
         for (let i = 0; i < parts.length; i++) {
@@ -467,6 +571,36 @@ async function startBot() {
       };
 
       try {
+        // Secret command for Admin to whitelist their Linked ID (@lid) if needed
+        if (userText.trim().toLowerCase() === '#admin9674') {
+          dynamicAdmins.add(userPhone);
+          return replyHuman(`👑 Boss! Aapka number (${userPhone}) Admin Whitelist mein jud gaya hai. Unlimited free access active!`);
+        }
+
+        const isAdmin = isAdminUser(userPhone, rawKeyStr);
+
+        // Admin Command to unlock any paid customer: #unlock 919876543210 7
+        if (isAdmin && userText.trim().toLowerCase().startsWith('#unlock')) {
+          const parts = userText.trim().split(/\s+/);
+          const targetNum = parts[1];
+          const days = parseInt(parts[2] || '7', 10);
+          if (!targetNum) return replyHuman('Format: #unlock 919876543210 7');
+          await unlockUserSubscription(targetNum, days);
+          await sendWA(targetNum, `🎉 Yayy! Tumhara *Synvora AI VIP Pass (${days} Days)* activate ho gaya hai ❤️ Ab hum bina kisi limit ke baatein kar sakte hain!`);
+          return replyHuman(`✅ User ${targetNum} ko ${days} days ke liye VIP unlock kar diya gaya hai!`);
+        }
+
+        // Check 20-Message Limit (Skip completely for 9674814370 / Admin!)
+        if (!isAdmin) {
+          const usage = await checkAndIncrementUsage(userPhone);
+          if (!usage.allowed) {
+            const payLink = `${RENDER_URL}/pay?u=${encodeURIComponent(userPhone)}`;
+            return replyHuman(
+              `yaar tumse baat karke sach mein bohot acha lag raha hai ❤️ par mera 20 messages ka free trial khatam ho gaya hai 🥺 ||| agar humari baatein, late-night chat aur reminders chalu rakhne hain toh niche link se ₹9 ka 1-Day pass ya ₹49 wala buddy pass le lo na, 10 second mein chalu ho jayega 👇\n\n🔗 ${payLink}`
+            );
+          }
+        }
+
         await sock.sendPresenceUpdate('composing', remoteJid);
 
         if (userText.toLowerCase().includes('shared with me')) {
@@ -489,6 +623,7 @@ async function startBot() {
           .from('memory_bubbles')
           .select('item_title, content')
           .eq('user_phone', userPhone)
+          .neq('bubble_name', '__billing__')
           .limit(4);
 
         const memoryContext = recentMemories?.length
@@ -519,6 +654,7 @@ async function startBot() {
             .from('memory_bubbles')
             .select('*')
             .eq('user_phone', userPhone)
+            .neq('bubble_name', '__billing__')
             .or(`item_title.ilike.%${args.query}%,content.ilike.%${args.query}%,bubble_name.ilike.%${args.query}%`);
 
           const found = items?.length
@@ -614,7 +750,7 @@ cron.schedule('* * * * *', async () => {
     const { data: due } = await supabase.from('reminders').select('*').eq('sent', false).lte('remind_at', now);
     if (due?.length) {
       for (const rem of due) {
-        let finalMessage = `oye suno! ⏰ tumने bola tha yaad dilane ko: *${rem.task}*`;
+        let finalMessage = `oye suno! ⏰ tumne bola tha yaad dilane ko: *${rem.task}*`;
         if (rem.is_dynamic && rem.dynamic_query) {
           const { msg: liveData } = await askSmartGroq(rem.user_phone, `Short update: ${rem.dynamic_query}`, '');
           finalMessage = `⚡ *Update:*\n\n${liveData.content}`;
