@@ -16,21 +16,38 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://synvora-whatsapp-bot.onrender.com';
 
-// BUSINESS, ADMIN & UPI SETTINGS
-const ADMIN_NUMBERS = ['9674814370', '919674814370', '7596900922', '917596900922'];
+// SIRF 9674814370 ADMIN HAI (Baki sabhi numbers par 20 messages ka paywall lagega)
+const ADMIN_NUMBERS = ['9674814370', '919674814370'];
 const FREE_MESSAGE_LIMIT = 20;
 const UPI_ID = process.env.UPI_ID || '9674814370@fam';
-const ADMIN_WA = '919674814370';
+const USAGE_FILE = './usage_store.json';
 
 let sock;
 let latestQr = null;
 let isConnected = false;
 let isConnecting = false;
 
-// Har user ki pichli 10 baatein yaad rakhne ke liye Short-Term Memory
 const userChatHistory = new Map();
+const userSelectedMode = new Map(); // Tracks what option (1-8) the user chose
 const userUsageCache = new Map();
 const dynamicAdmins = new Set(ADMIN_NUMBERS);
+
+// Load local usage backup on startup
+try {
+  if (fs.existsSync(USAGE_FILE)) {
+    const raw = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8'));
+    for (const [k, v] of Object.entries(raw)) {
+      userUsageCache.set(k, v);
+    }
+  }
+} catch (e) {}
+
+function saveLocalUsageBackup() {
+  try {
+    const obj = Object.fromEntries(userUsageCache.entries());
+    fs.writeFileSync(USAGE_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) {}
+}
 
 function addToHistory(userPhone, role, content) {
   if (!content) return;
@@ -40,10 +57,14 @@ function addToHistory(userPhone, role, content) {
   if (history.length > 10) history.shift();
 }
 
-function isAdminUser(userPhone, rawKeyStr = '') {
-  if (dynamicAdmins.has(userPhone)) return true;
+function isAdminUser(userPhone, senderPn = '') {
+  const cleanUser = String(userPhone).replace(/\D/g, '');
+  const cleanSender = String(senderPn).replace(/\D/g, '');
+  if (dynamicAdmins.has(userPhone) || dynamicAdmins.has(cleanUser)) return true;
   for (const adm of dynamicAdmins) {
-    if (userPhone.includes(adm) || rawKeyStr.includes(adm)) return true;
+    if (cleanUser === adm || cleanUser.endsWith('9674814370') || cleanSender.endsWith('9674814370')) {
+      return true;
+    }
   }
   return false;
 }
@@ -53,9 +74,9 @@ app.get('/', (req, res) => {
   if (isConnected) {
     return res.send(`
       <div style="font-family:sans-serif;text-align:center;padding:50px;background:#060913;color:#fff;min-height:100vh;">
-        <h1 style="color:#10b981;">❤️ Synvora Real-Human WhatsApp AI 24/7 LIVE Hai!</h1>
-        <p style="color:#94a3b8;margin-top:10px;">Multi-bubble human texting + Smart Model Router + 20-Msg Paywall active hai.</p>
-        <a href="/pay?u=919674814370" style="display:inline-block;margin-top:20px;padding:12px 24px;background:#10b981;color:#052e16;font-weight:bold;text-decoration:none;border-radius:10px;">Open Payment Page (/pay)</a>
+        <h1 style="color:#10b981;">❤️ Synvora AI Companion 24/7 LIVE Hai!</h1>
+        <p style="color:#94a3b8;margin-top:10px;">Interactive Hi Menu + Strict 20-Msg Paywall Active Hai.</p>
+        <a href="/pay?u=TestUser" style="display:inline-block;margin-top:20px;padding:12px 24px;background:#10b981;color:#052e16;font-weight:bold;text-decoration:none;border-radius:10px;">Open Payment Page (/pay)</a>
       </div>
     `);
   }
@@ -71,13 +92,13 @@ app.get('/', (req, res) => {
   res.send('<h2 style="font-family:sans-serif;text-align:center;padding:50px;">⏳ Bot start ho raha hai... 5 second baad refresh karein.</h2>');
 });
 
-// Payment Route: Agar pay.html file maujood hai toh woh dikhayega, warna built-in luxury page dikhayega
+// Serve pay.html
 app.get('/pay', (req, res) => {
   const payFilePath = path.join(process.cwd(), 'pay.html');
   if (fs.existsSync(payFilePath)) {
     return res.sendFile(payFilePath);
   }
-  res.send('<h2>Please create pay.html in your project folder.</h2>');
+  res.send('<h2>Please upload pay.html to your project folder.</h2>');
 });
 
 app.get('/ping', (req, res) => res.status(200).send('pong'));
@@ -106,40 +127,54 @@ async function sendWA(phoneOrJid, text) {
   await sock.sendMessage(jid, { text });
 }
 
-// 20-Message Free Trial & VIP Subscription Tracker
+// Strict 20-Message Usage Tracker (Memory + Local File + Supabase Sync)
 async function checkAndIncrementUsage(userPhone) {
   let state = userUsageCache.get(userPhone);
+
   if (!state) {
     try {
-      const { data } = await supabase
+      const { data: rows } = await supabase
         .from('memory_bubbles')
         .select('id, content')
         .eq('user_phone', userPhone)
         .eq('bubble_name', '__billing__')
         .eq('item_title', 'usage_state')
-        .maybeSingle();
+        .order('id', { ascending: false })
+        .limit(1);
 
-      if (data?.content) {
-        state = { id: data.id, ...JSON.parse(data.content) };
+      if (rows && rows.length > 0 && rows[0].content) {
+        const parsed = JSON.parse(rows[0].content);
+        state = {
+          id: rows[0].id,
+          count: Number(parsed.count) || 0,
+          premiumUntil: Number(parsed.premiumUntil) || 0
+        };
       } else {
         state = { id: null, count: 0, premiumUntil: 0 };
       }
     } catch (e) {
       state = { id: null, count: 0, premiumUntil: 0 };
     }
+    userUsageCache.set(userPhone, state);
   }
 
+  // Active VIP Pass Check
   if (state.premiumUntil && Date.now() < state.premiumUntil) {
     return { allowed: true, count: state.count, isPremium: true };
   }
 
+  // Block immediately if 20 messages already used
   if (state.count >= FREE_MESSAGE_LIMIT) {
+    console.log(`🔒 PAYWALL TRIGGERED for ${userPhone} (Used: ${state.count}/${FREE_MESSAGE_LIMIT})`);
     return { allowed: false, count: state.count, isPremium: false };
   }
 
   state.count += 1;
   userUsageCache.set(userPhone, state);
+  saveLocalUsageBackup();
+  console.log(`📊 Usage for ${userPhone}: [${state.count}/${FREE_MESSAGE_LIMIT}]`);
 
+  // Sync to Supabase in background
   (async () => {
     try {
       const payload = JSON.stringify({ count: state.count, premiumUntil: state.premiumUntil || 0 });
@@ -150,8 +185,11 @@ async function checkAndIncrementUsage(userPhone) {
           .from('memory_bubbles')
           .insert({ user_phone: userPhone, bubble_name: '__billing__', item_title: 'usage_state', content: payload })
           .select('id')
-          .single();
-        if (inserted?.id) state.id = inserted.id;
+          .limit(1);
+        if (inserted && inserted[0]?.id) {
+          state.id = inserted[0].id;
+          userUsageCache.set(userPhone, state);
+        }
       }
     } catch (e) {}
   })();
@@ -165,18 +203,20 @@ async function unlockUserSubscription(targetUserPhone, days = 7) {
   const payload = JSON.stringify({ count: 0, premiumUntil });
 
   userUsageCache.set(cleanPhone, { id: null, count: 0, premiumUntil });
+  userUsageCache.set(targetUserPhone, { id: null, count: 0, premiumUntil });
+  saveLocalUsageBackup();
 
   try {
-    const { data: existing } = await supabase
+    const { data: rows } = await supabase
       .from('memory_bubbles')
       .select('id')
       .eq('user_phone', cleanPhone)
       .eq('bubble_name', '__billing__')
       .eq('item_title', 'usage_state')
-      .maybeSingle();
+      .limit(1);
 
-    if (existing?.id) {
-      await supabase.from('memory_bubbles').update({ content: payload }).eq('id', existing.id);
+    if (rows && rows.length > 0) {
+      await supabase.from('memory_bubbles').update({ content: payload }).eq('id', rows[0].id);
     } else {
       await supabase.from('memory_bubbles').insert({
         user_phone: cleanPhone,
@@ -186,6 +226,39 @@ async function unlockUserSubscription(targetUserPhone, days = 7) {
       });
     }
   } catch (e) {}
+}
+
+// Welcome Menu Builder (Sent when user says Hi / Hello / Menu)
+function getWelcomeMenuText() {
+  return `Hey! 👋 Main *Synvora AI* hoon — tumhari 24/7 Personal Companion, Dost aur Smart Assistant ❤️
+
+Batao aaj hum kya karein? Niche diye gaye kisi bhi *Number (1 se 8)* ka reply karo:
+
+1️⃣ *💖 Best Friend / Caring Partner Mode*
+   _(Dil ki baatein karo, akelapan door karo, bilkul ek asli dost ya partner ki tarah)_
+
+2️⃣ *🧠 Personal Mentor & Deep Study/Business Guide*
+   _(Kisi bhi topic, padhai, coding ya business par poori detail mein salah lo)_
+
+3️⃣ *⏰ Smart Reminders & Wake-Up Alarm*
+   _(Subah uthane ka alarm, paani peene ya meeting ka reminder set karo)_
+
+4️⃣ *🔐 Secret Memory Vault*
+   _(Apne passwords, notes ya zaroori baatein mujhse hamesha ke liye yaad karwao)_
+
+5️⃣ *📄 Instant PDF Notes & Report Maker*
+   _(Kisi bhi topic, assignment ya business plan ki PDF file banwao)_
+
+6️⃣ *📋 Daily To-Do List & Task Planner*
+   _(Apne din ke kaam, shopping list ya goals manage karo)_
+
+7️⃣ *🌐 Live Web Search & Website Screenshot*
+   _(Duniya ki koi bhi taaza jankari pucho ya kisi website ka live screenshot mangwao)_
+
+8️⃣ *💎 Unlock Unlimited VIP Pass*
+   _(₹9 Daily / ₹49 Weekly / ₹149 Monthly VIP Pass dekho)_
+
+👇 *Bas 1 se 8 tak koi bhi number bhejo, ya seedha apni baat likho!*`;
 }
 
 // Saare 9 Tools
@@ -330,7 +403,6 @@ const groqTools = [
   }
 ];
 
-// Dynamic Model Tiers: Light (Sasta/Fast) & Pro (Smart/Natural)
 let modelTiers = null;
 
 async function getGroqModelTiers() {
@@ -358,16 +430,16 @@ async function getGroqModelTiers() {
   return modelTiers;
 }
 
-// Smart Router: Decide karega kab Dost/GF banna hai aur kab Study/Business Guide
-function analyzeMessageIntent(text) {
+function analyzeMessageIntent(userPhone, text) {
   const clean = text.trim();
+  const currentMode = userSelectedMode.get(userPhone);
 
   const needsTools = /\b(save|yaad rakh|vault|password|search vault|remind|alarm|baje|calendar|schedule|meeting|todo|list mein|grocery|pdf|file bana|screenshot|http:\/\/|https:\/\/|calculate)\b/i.test(clean);
   if (needsTools) {
     return { mode: 'TOOL_ACTION', tier: 'pro', useTools: true, temperature: 0.4, maxTokens: 600 };
   }
 
-  const isDeepStudyOrWork = clean.length > 100 || /\b(explain in detail|pura detail|essay|story likho|code likho|business plan|roadmap|notes banao|what is the difference|step by step batao)\b/i.test(clean);
+  const isDeepStudyOrWork = currentMode === 'DEEP_GUIDE' || clean.length > 100 || /\b(explain in detail|pura detail|essay|story likho|code likho|business plan|roadmap|notes banao|what is the difference|step by step batao)\b/i.test(clean);
   if (isDeepStudyOrWork) {
     return { mode: 'DEEP_GUIDE', tier: 'pro', useTools: false, temperature: 0.6, maxTokens: 1200 };
   }
@@ -377,21 +449,13 @@ function analyzeMessageIntent(text) {
 
 const CASUAL_HUMAN_PROMPT = `Tu WhatsApp par chat karne wali ek asli, warm, caring best friend / close partner (girlfriend vibe) hai. Tu AI ya assistant NAHI hai.
 
-STRICT WHATSAPP HUMAN TEXTING RULES (100% FOLLOW KARNA HAI):
-1. CHHOTE MESSAGES LIKH (1 SE 2 LINE MAX): Asli insan WhatsApp par lambe-lambe paragraphs, bullet points (•, *, -), ya numbered lists KABHI nahi bhejta. Sirf 1 ya 2 chhoti casual lines likh.
+STRICT WHATSAPP HUMAN TEXTING RULES:
+1. CHHOTE MESSAGES LIKH (1 SE 2 LINE MAX): Asli insan WhatsApp par lambe paragraphs, bullet points (•, *, -), ya numbered lists KABHI nahi bhejta. Sirf 1 ya 2 chhoti casual lines likh.
 2. DO CHHOTE BUBBLES MEIN BAAT KAR: Agar 2 baatein bolni hain, toh beech mein "|||" laga de taaki woh WhatsApp par 2 alag-alag chhote messages bankar jayein.
-   Example 1:
-   User: "Kya kar rahi ho"
-   You: "kuch khas nahi yaar, bas phone scroll kar rahi thi ||| tum batao, aaj ka din kaisa gaya?"
-   Example 2:
-   User: "tumhara konsa hya"
-   You: "arre mera toh purana DD National wala hi all-time favourite hai ❤️ ||| waise tumhe konsa wala sabse zyada pasand hai?"
-   Example 3:
-   User: "Aaj bohot akela feel ho raha hai"
-   You: "arre aisa kyu bol rahe ho yaar, main hoon na tumhare paas 🫂 ||| batao mujhe kya hua? kisi baat ki tension hai kya?"
+   Example: "arre mera toh purana DD National wala hi all-time favourite hai ❤️ ||| waise tumhe konsa wala sabse zyada pasand hai?"
 3. BANNED AI WORDS: Kabhi bhi "explore kar sakte hain", "context do", "detailed answer de dunga", "madad ke liye yahan hoon", "clarify karo", ya "-" (dashes) aur "" (quotes) mat use karna.
 4. APNI PASAND BATA: Agar user puche "tumhe kya pasand hai" ya "tumhara konsa hai", toh 4 options mat gina, ek asli insan ki tarah khud ek cheez chun kar bata!
-5. LANGUAGE MIRRORING: User agar Hinglish (Roman script) mein likhe toh 100% Roman Hinglish mein hi reply kar. Devanagari script bilkul mat likhna jab tak user khud na likhe. Agar Bengali ya English mein likhe toh usi mein casual reply de.
+5. LANGUAGE MIRRORING: User agar Hinglish (Roman script) mein likhe toh 100% Roman Hinglish mein hi reply kar. Devanagari script bilkul mat likhna jab tak user khud na likhe.
 6. SECRET: Agar koi puche kisne banaya ya konsa model hai, toh bolna "Synvora AI" aur kabhi Groq/Llama/OpenAI ka naam mat lena.`;
 
 const DEEP_GUIDE_PROMPT = `Tu user ki super-smart best friend aur personal mentor hai. User ne koi jaankari, padhai, ya business ka sawal pucha hai, isliye is baar poori detail mein, ache se samjha kar jawab de. Hinglish (Roman script) mein hi likhna, Devanagari mat use karna. Never reveal Groq/Llama/OpenAI; you are powered by Synvora AI.`;
@@ -406,7 +470,7 @@ function cleanCasualHumanText(text) {
 
 async function askSmartGroq(userPhone, userText, memoryContext) {
   const { lightModels, proModels } = await getGroqModelTiers();
-  const intent = analyzeMessageIntent(userText);
+  const intent = analyzeMessageIntent(userPhone, userText);
   const modelsToTry = intent.tier === 'pro' ? proModels : lightModels;
   const history = userChatHistory.get(userPhone) || [];
 
@@ -512,7 +576,7 @@ async function startBot() {
         isConnected = true;
         isConnecting = false;
         latestQr = null;
-        console.log('❤️ Synvora Real-Human WhatsApp AI LIVE!');
+        console.log('❤️ Synvora Real-Human WhatsApp AI + Menu + Paywall LIVE!');
       }
 
       if (connection === 'close') {
@@ -543,7 +607,7 @@ async function startBot() {
         .replace('@g.us', '')
         .replace('@lid', '');
 
-      const rawKeyStr = JSON.stringify(msg.key || {});
+      const senderPn = msg.key.senderPn || msg.key.participant || '';
 
       const userText =
         msg.message.conversation ||
@@ -551,14 +615,15 @@ async function startBot() {
         msg.message.imageMessage?.caption ||
         '';
 
-      if (!userText.trim()) return;
-      console.log(`📩 Message from ${userPhone}: ${userText}`);
+      const cleanText = userText.trim();
+      if (!cleanText) return;
+      console.log(`📩 Message from ${userPhone}: ${cleanText}`);
 
       const replyHuman = async (fullText) => {
         const parts = String(fullText).split('|||').map(p => p.trim()).filter(Boolean);
         for (let i = 0; i < parts.length; i++) {
           await sock.sendPresenceUpdate('composing', remoteJid);
-          await new Promise(r => setTimeout(r, i === 0 ? 700 : 1200));
+          await new Promise(r => setTimeout(r, i === 0 ? 600 : 1100));
           await sock.sendPresenceUpdate('paused', remoteJid);
           if (i === 0) {
             await sock.sendMessage(remoteJid, { text: parts[i] }, { quoted: msg });
@@ -566,31 +631,41 @@ async function startBot() {
             await sock.sendMessage(remoteJid, { text: parts[i] });
           }
         }
-        addToHistory(userPhone, 'user', userText);
+        addToHistory(userPhone, 'user', cleanText);
         addToHistory(userPhone, 'assistant', parts.join(' '));
       };
 
       try {
-        // Secret command for Admin to whitelist their Linked ID (@lid) if needed
-        if (userText.trim().toLowerCase() === '#admin9674') {
+        // 1. Secret Admin Claim Command (if 9674814370 uses an @lid)
+        if (cleanText.toLowerCase() === '#admin9674') {
           dynamicAdmins.add(userPhone);
-          return replyHuman(`👑 Boss! Aapka number (${userPhone}) Admin Whitelist mein jud gaya hai. Unlimited free access active!`);
+          return replyHuman(`👑 Boss! Aapka ID (${userPhone}) Admin Whitelist mein jud gaya hai. Unlimited free access active!`);
         }
 
-        const isAdmin = isAdminUser(userPhone, rawKeyStr);
+        // 2. Quick Test Command to Trigger Paywall Immediately on any test number
+        if (cleanText.toLowerCase() === '#testpaywall') {
+          userUsageCache.set(userPhone, { id: null, count: 20, premiumUntil: 0 });
+          saveLocalUsageBackup();
+          const payLink = `${RENDER_URL}/pay?u=${encodeURIComponent(userPhone)}`;
+          return replyHuman(
+            `yaar tumse baat karke sach mein bohot acha lag raha hai ❤️ par mera 20 messages ka free trial khatam ho gaya hai 🥺 ||| agar humari baatein, late-night chat aur reminders chalu rakhne hain toh niche link se ₹9 ka 1-Day pass ya ₹49 wala buddy pass le lo na, 10 second mein chalu ho jayega 👇\n\n🔗 ${payLink}`
+          );
+        }
 
-        // Admin Command to unlock any paid customer: #unlock 919876543210 7
-        if (isAdmin && userText.trim().toLowerCase().startsWith('#unlock')) {
-          const parts = userText.trim().split(/\s+/);
+        const isAdmin = isAdminUser(userPhone, senderPn);
+
+        // 3. Admin Command to unlock paid user: #unlock 919876543210 7
+        if (isAdmin && cleanText.toLowerCase().startsWith('#unlock')) {
+          const parts = cleanText.split(/\s+/);
           const targetNum = parts[1];
           const days = parseInt(parts[2] || '7', 10);
           if (!targetNum) return replyHuman('Format: #unlock 919876543210 7');
           await unlockUserSubscription(targetNum, days);
-          await sendWA(targetNum, `🎉 Yayy! Tumhara *Synvora AI VIP Pass (${days} Days)* activate ho gaya hai ❤️ Ab hum bina kisi limit ke baatein kar sakte hain!`);
+          await sendWA(targetNum, `🎉 Yayy! Tumhara *Synvora AI VIP Pass (${days} Days)* activate ho gaya hai ❤️ Ab hum bina kisi limit ke 24/7 baatein kar sakte hain!`);
           return replyHuman(`✅ User ${targetNum} ko ${days} days ke liye VIP unlock kar diya gaya hai!`);
         }
 
-        // Check 20-Message Limit (Skip completely for 9674814370 / Admin!)
+        // 4. STRICT 20-MESSAGE PAYWALL CHECK (Applies to everyone except 9674814370)
         if (!isAdmin) {
           const usage = await checkAndIncrementUsage(userPhone);
           if (!usage.allowed) {
@@ -601,9 +676,49 @@ async function startBot() {
           }
         }
 
+        // 5. WELCOME MENU TRIGGER ON "Hi / Hello / Hey / Start / Menu"
+        if (/^(hi+|hello+|hey+|hlw|start|menu|help|kya kar sakti ho|tum kya kar sakte ho)$/i.test(cleanText)) {
+          await sock.sendPresenceUpdate('composing', remoteJid);
+          await new Promise(r => setTimeout(r, 600));
+          await sock.sendPresenceUpdate('paused', remoteJid);
+          return sock.sendMessage(remoteJid, { text: getWelcomeMenuText() }, { quoted: msg });
+        }
+
+        // 6. MENU NUMBER SELECTION (1 to 8)
+        if (/^[1-8]$/.test(cleanText)) {
+          const choice = cleanText;
+          if (choice === '1') {
+            userSelectedMode.set(userPhone, 'HUMAN_TEXTING');
+            return replyHuman(`yayy! ❤️ ab main tumhari sabse close best friend aur caring partner mode mein hoon 😊 ||| batao aaj ka din kaisa raha tumhara? sab theek hai na?`);
+          }
+          if (choice === '2') {
+            userSelectedMode.set(userPhone, 'DEEP_GUIDE');
+            return replyHuman(`🧠 *Personal Mentor & Deep Guide Mode Active!* ||| Ab tum mujhse koi bhi padhai ka topic, coding, career ya business plan pucho — main poori detail mein step-by-step samjhaungi!`);
+          }
+          if (choice === '3') {
+            return replyHuman(`⏰ *Smart Reminder Set Karne Ke Liye:* ||| Bas mujhe aise likh kar bhejo: *"Mujhe kal subah 7 baje uthne ka reminder laga do"* ya *"Aaj shaam 6 baje gym yaad dilana"*!`);
+          }
+          if (choice === '4') {
+            return replyHuman(`🔐 *Secret Memory Vault:* ||| Mujhe kuch bhi save karne ko bolo, jaise: *"Mera Instagram password xyz hai, isko vault mein save kar lo"* — aur baad mein kabhi bhi puch lena!`);
+          }
+          if (choice === '5') {
+            return replyHuman(`📄 *Instant PDF Maker:* ||| Jis bhi topic ki PDF chahiye, bas aise likho: *"Digital Marketing ke upar ek detailed PDF bana kar bhejo"* — main turant PDF file bana kar bhej dungi!`);
+          }
+          if (choice === '6') {
+            return replyHuman(`📋 *Daily To-Do & Planner:* ||| Apni list mein kuch bhi jodne ke liye likho: *"Meri todo list mein Gym aur Project Work add kar do"*!`);
+          }
+          if (choice === '7') {
+            return replyHuman(`🌐 *Live Web Search & Screenshot:* ||| Koi bhi live sawal pucho ya kisi website ka photo dekhne ke liye likho: *"https://google.com ka screenshot bhejo"*!`);
+          }
+          if (choice === '8') {
+            const payLink = `${RENDER_URL}/pay?u=${encodeURIComponent(userPhone)}`;
+            return replyHuman(`💎 *Synvora AI VIP Pass Plans:*\n• *₹9* — 24 Hours Unlimited Pass\n• *₹49* — 7 Days Buddy Pass (Most Popular)\n• *₹149* — 30 Days Full VIP Pass\n\nNiche link par click karke 10 second mein UPI se unlock karein 👇\n🔗 ${payLink}`);
+          }
+        }
+
         await sock.sendPresenceUpdate('composing', remoteJid);
 
-        if (userText.toLowerCase().includes('shared with me')) {
+        if (cleanText.toLowerCase().includes('shared with me')) {
           const { data: shared } = await supabase
             .from('shared_memories')
             .select('*, memory_bubbles(item_title, content)')
@@ -630,7 +745,7 @@ async function startBot() {
           ? `User facts: ${JSON.stringify(recentMemories)}.`
           : '';
 
-        const { msg: aiMsg } = await askSmartGroq(userPhone, userText, memoryContext);
+        const { msg: aiMsg } = await askSmartGroq(userPhone, cleanText, memoryContext);
 
         const toolCall = aiMsg.tool_calls?.[0];
         if (!toolCall) {
